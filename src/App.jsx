@@ -228,9 +228,9 @@ export default function App() {
     };
   }, []);
 
-  const persist = useCallback(async (next) => {
+  const persist = useCallback(async (next, prev) => {
     try {
-      await saveData(next);
+      await saveData(next, prev);
       setSaveError(false);
     } catch (e) {
       setSaveError(true);
@@ -241,7 +241,7 @@ export default function App() {
     (updater) => {
       setData((prev) => {
         const next = typeof updater === "function" ? updater(prev || SEED) : updater;
-        persist(next);
+        persist(next, prev);
         return next;
       });
     },
