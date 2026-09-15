@@ -173,6 +173,8 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Todas");
   const [showLowOnly, setShowLowOnly] = useState(false);
+  const [productSortAsc, setProductSortAsc] = useState(true);
+  const [materialSortAsc, setMaterialSortAsc] = useState(true);
   const [productModal, setProductModal] = useState(false);
   const [materialModal, setMaterialModal] = useState(false);
   const [productForm, setProductForm] = useState(emptyProductForm());
@@ -278,28 +280,32 @@ export default function App() {
   // ---------- filters ----------
   const filteredProducts = useMemo(() => {
     if (!data) return [];
-    return data.products.filter((it) => {
-      if (activeCategory !== "Todas" && it.category !== activeCategory) return false;
-      if (showLowOnly && !(Number(it.qty) <= Number(it.minStock))) return false;
-      if (query.trim()) {
-        const q = query.toLowerCase();
-        if (!it.name.toLowerCase().includes(q) && !it.code.toLowerCase().includes(q)) return false;
-      }
-      return true;
-    });
-  }, [data, activeCategory, showLowOnly, query]);
+    return data.products
+      .filter((it) => {
+        if (activeCategory !== "Todas" && it.category !== activeCategory) return false;
+        if (showLowOnly && !(Number(it.qty) <= Number(it.minStock))) return false;
+        if (query.trim()) {
+          const q = query.toLowerCase();
+          if (!it.name.toLowerCase().includes(q) && !it.code.toLowerCase().includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (productSortAsc ? a.name.localeCompare(b.name, "pt-BR") : b.name.localeCompare(a.name, "pt-BR")));
+  }, [data, activeCategory, showLowOnly, query, productSortAsc]);
 
   const filteredMaterials = useMemo(() => {
     if (!data) return [];
-    return data.materials.filter((it) => {
-      if (showLowOnly && !(Number(it.qty) <= Number(it.minStock))) return false;
-      if (query.trim()) {
-        const q = query.toLowerCase();
-        if (!it.name.toLowerCase().includes(q) && !it.code.toLowerCase().includes(q)) return false;
-      }
-      return true;
-    });
-  }, [data, showLowOnly, query]);
+    return data.materials
+      .filter((it) => {
+        if (showLowOnly && !(Number(it.qty) <= Number(it.minStock))) return false;
+        if (query.trim()) {
+          const q = query.toLowerCase();
+          if (!it.name.toLowerCase().includes(q) && !it.code.toLowerCase().includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (materialSortAsc ? a.name.localeCompare(b.name, "pt-BR") : b.name.localeCompare(a.name, "pt-BR")));
+  }, [data, showLowOnly, query, materialSortAsc]);
 
   const productStats = useMemo(() => {
     if (!data) return { total: 0, low: 0, value: 0 };
@@ -684,6 +690,8 @@ export default function App() {
               setQuery={setQuery}
               showLowOnly={showLowOnly}
               setShowLowOnly={setShowLowOnly}
+              sortAsc={productSortAsc}
+              onToggleSort={() => setProductSortAsc((v) => !v)}
               chips={
                 <div style={styles.chipRow}>
                   <button
@@ -818,7 +826,14 @@ export default function App() {
               <StatCard label="Valor em estoque" value={currency(materialStats.value)} />
             </section>
 
-            <Toolbar query={query} setQuery={setQuery} showLowOnly={showLowOnly} setShowLowOnly={setShowLowOnly} />
+            <Toolbar
+              query={query}
+              setQuery={setQuery}
+              showLowOnly={showLowOnly}
+              setShowLowOnly={setShowLowOnly}
+              sortAsc={materialSortAsc}
+              onToggleSort={() => setMaterialSortAsc((v) => !v)}
+            />
 
             <section style={styles.tableWrap}>
               <div className="table-head" style={{ ...styles.tableHead, gridTemplateColumns: "1.8fr 1fr 1fr 1.5fr 1fr" }}>
@@ -1047,7 +1062,9 @@ export default function App() {
                       >
                         <option value="">Selecione…</option>
                         {data &&
-                          data.materials.map((m) => (
+                          [...data.materials]
+                            .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
+                            .map((m) => (
                             <option key={m.id} value={m.id}>
                               {m.name} ({currency(m.cost)}/{m.unit})
                             </option>
@@ -1292,7 +1309,7 @@ export default function App() {
   );
 }
 
-function Toolbar({ query, setQuery, showLowOnly, setShowLowOnly, chips }) {
+function Toolbar({ query, setQuery, showLowOnly, setShowLowOnly, chips, sortAsc, onToggleSort }) {
   return (
     <section style={styles.toolbar}>
       <div style={styles.searchWrap}>
@@ -1301,6 +1318,11 @@ function Toolbar({ query, setQuery, showLowOnly, setShowLowOnly, chips }) {
       </div>
       <div style={styles.chipRow}>
         {chips}
+        {onToggleSort && (
+          <button className="chip" style={styles.chip} onClick={onToggleSort}>
+            {sortAsc ? "A → Z" : "Z → A"}
+          </button>
+        )}
         <button
           className="chip"
           style={{ ...styles.chip, ...(showLowOnly ? styles.chipWarnActive : {}), marginLeft: chips ? 4 : 0 }}
@@ -1505,6 +1527,57 @@ function PhotoPicker({ photo, uploading, onChange, onRemove }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+export function CatalogPage() {
+  const [products, setProducts] = useState(null);
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await loadData();
+        if (!cancelled) setProducts(result ? result.products : []);
+      } catch (e) {
+        if (!cancelled) setProducts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <div style={styles.page}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Jost:wght@300;400;500;600&display=swap');
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        input, select { font-family: 'Jost', sans-serif; }
+        ::placeholder { color: #A9A398; }
+        button { cursor: pointer; font-family: 'Jost', sans-serif; }
+        .chip:hover { filter: brightness(0.97); }
+        @media (max-width: 760px) {
+          .grid { grid-template-columns: repeat(2, 1fr) !important; }
+        }
+      `}</style>
+      <header style={styles.header}>
+        <div style={styles.headerInner}>
+          <div style={styles.brandRow}>
+            <img src={LOGO_URL} alt="Mawi Florart" style={styles.brandLogo} />
+            <div>
+              <h1 style={styles.brandTitle}>MawiFlorart</h1>
+              <p style={styles.brandSub}>catálogo de produtos</p>
+            </div>
+          </div>
+        </div>
+      </header>
+      <main style={styles.main}>
+        <CatalogoTab products={products || []} loading={products === null} query={query} setQuery={setQuery} />
+      </main>
     </div>
   );
 }
