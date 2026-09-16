@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData } from "./firebase.js";
+import { loadData, saveData, loginWithPassword, logout, watchAuthState } from "./firebase.js";
+
 import {
   Flower2,
   Leaf,
@@ -169,6 +170,11 @@ function emptyMaterialForm() {
 
 export default function App() {
   const [data, setData] = useState(null);
+  const [authUser, setAuthUser] = useState(undefined); // undefined = ainda não sabemos, null = deslogado
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
   const [tab, setTab] = useState("produtos");
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Todas");
@@ -209,6 +215,14 @@ export default function App() {
   }
 
   useEffect(() => {
+    const unsubscribe = watchAuthState((user) => {
+      setAuthUser(user || null);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!authUser) return; // só carrega os dados depois do login
     let cancelled = false;
     (async () => {
       try {
@@ -228,7 +242,20 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [authUser]);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setAuthError("");
+    setAuthBusy(true);
+    try {
+      await loginWithPassword(authEmail.trim(), authPassword);
+    } catch (err) {
+      setAuthError("E-mail ou senha incorretos.");
+    } finally {
+      setAuthBusy(false);
+    }
+  }
 
   const persist = useCallback(async (next, prev) => {
     try {
@@ -574,6 +601,58 @@ export default function App() {
 
   const loading = data === null;
 
+  // ainda checando se já está logado
+  if (authUser === undefined) {
+    return (
+      <div style={styles.authPage}>
+        <div style={styles.authBox}>
+          <img src={LOGO_URL} alt="Mawi Florart" style={{ width: 90, height: 90, objectFit: "contain", marginBottom: 10 }} />
+          <p style={{ color: "#B0A599", fontSize: 13 }}>Carregando…</p>
+        </div>
+      </div>
+    );
+  }
+
+  // não logado: mostra a tela de login, sem carregar nenhum dado do estoque
+  if (!authUser) {
+    return (
+      <div style={styles.authPage}>
+        <style>{`
+          @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;1,400;1,500&family=Jost:wght@300;400;500&display=swap');
+          * { box-sizing: border-box; }
+          input { font-family: 'Jost', sans-serif; }
+          button { cursor: pointer; font-family: 'Jost', sans-serif; }
+        `}</style>
+        <form style={styles.authBox} onSubmit={handleLogin}>
+          <img src={LOGO_URL} alt="Mawi Florart" style={{ width: 90, height: 90, objectFit: "contain", marginBottom: 6 }} />
+          <h1 style={styles.authTitle}>Painel interno</h1>
+          <p style={styles.authSub}>faça login para acessar o estoque</p>
+          <input
+            style={styles.authInput}
+            type="email"
+            placeholder="e-mail"
+            value={authEmail}
+            onChange={(e) => setAuthEmail(e.target.value)}
+            autoFocus
+            required
+          />
+          <input
+            style={styles.authInput}
+            type="password"
+            placeholder="senha"
+            value={authPassword}
+            onChange={(e) => setAuthPassword(e.target.value)}
+            required
+          />
+          {authError && <p style={styles.authError}>{authError}</p>}
+          <button type="submit" style={styles.authBtn} disabled={authBusy}>
+            {authBusy ? "Entrando…" : "Entrar"}
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.page}>
       <style>{`
@@ -643,6 +722,14 @@ export default function App() {
             }}
           >
             Catálogo
+          </button>
+          <button
+            className="tab-btn"
+            style={{ ...styles.tabBtn, marginLeft: "auto" }}
+            onClick={() => logout()}
+            title="Sair do painel"
+          >
+            Sair
           </button>
         </div>
       </header>
@@ -1755,4 +1842,11 @@ const styles = {
   catalogCardFooter: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   catalogCardPrice: { fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", fontWeight: 500, fontSize: 15, color: "#5C5049" },
   catalogWaBtn: { width: 26, height: 26, borderRadius: "50%", border: "1px solid #E5DAD3", background: "transparent", color: "#A8687A", display: "inline-flex", alignItems: "center", justifyContent: "center" },
+  authPage: { minHeight: "100vh", background: "#FEFCFA", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Jost', sans-serif" },
+  authBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 12, background: "#FFFFFF", border: "1px solid #E5DAD3", borderRadius: 10, padding: "40px 36px", width: "100%", maxWidth: 320 },
+  authTitle: { fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", fontWeight: 500, fontSize: 24, color: "#4A3F38", margin: 0 },
+  authSub: { color: "#B0A599", fontSize: 12, margin: "0 0 10px", letterSpacing: 0.3 },
+  authInput: { width: "100%", border: "1px solid #E5DAD3", borderRadius: 4, padding: "10px 12px", fontSize: 13.5, outline: "none", background: "#FEFCFA", color: "#4A3F38" },
+  authError: { color: "#B15768", fontSize: 12.5, margin: 0 },
+  authBtn: { width: "100%", background: "#A8687A", color: "#FFF9F7", border: "none", borderRadius: 999, padding: "11px 0", fontWeight: 500, fontSize: 13.5, marginTop: 6 },
 };

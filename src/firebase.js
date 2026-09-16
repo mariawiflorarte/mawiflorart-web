@@ -9,6 +9,7 @@ import {
   getDocs,
   writeBatch,
 } from "firebase/firestore";
+import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: "AIzaSyCsJf2Zy4G8stO6HANQNfUJLgXOLHUmYt8",
@@ -21,6 +22,19 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
+export const auth = getAuth(app);
+
+// Login do painel interno (Produtos / Matéria-Prima). O catálogo público
+// (/catalogo) nunca passa por aqui — continua acessível sem login.
+export function loginWithPassword(email, password) {
+  return signInWithEmailAndPassword(auth, email, password);
+}
+export function logout() {
+  return signOut(auth);
+}
+export function watchAuthState(callback) {
+  return onAuthStateChanged(auth, callback);
+}
 
 // Estrutura nova: cada produto e cada matéria-prima é o SEU PRÓPRIO documento,
 // então o limite de 1MB do Firestore passa a valer por item, não para o
