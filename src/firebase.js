@@ -8,6 +8,9 @@ import {
   collection,
   getDocs,
   writeBatch,
+  addDoc,
+  query,
+  orderBy,
 } from "firebase/firestore";
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "firebase/auth";
 
@@ -124,4 +127,18 @@ export async function saveData(next, prev) {
   }
 
   if (hasWrites) await batch.commit();
+}
+
+// Histórico de vendas: cada saída de produto vira um registro próprio,
+// guardado à parte (não entra no diff de produtos/matérias-primas acima).
+const SALES_COL = collection(db, "sales");
+
+export async function addSale(sale) {
+  const docRef = await addDoc(SALES_COL, sale);
+  return { id: docRef.id, ...sale };
+}
+
+export async function loadSales() {
+  const snap = await getDocs(query(SALES_COL, orderBy("timestamp", "desc")));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }

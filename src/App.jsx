@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData, loginWithPassword, logout, watchAuthState } from "./firebase.js";
+import { loadData, saveData, loginWithPassword, logout, watchAuthState, addSale, loadSales } from "./firebase.js";
 
 import {
   Flower2,
@@ -175,6 +175,20 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState("");
   const [authError, setAuthError] = useState("");
   const [authBusy, setAuthBusy] = useState(false);
+  const [sales, setSales] = useState(null);
+  const [salesLoading, setSalesLoading] = useState(false);
+
+  async function refreshSales() {
+    setSalesLoading(true);
+    try {
+      const result = await loadSales();
+      setSales(result);
+    } catch (e) {
+      setSales((prev) => prev || []);
+    } finally {
+      setSalesLoading(false);
+    }
+  }
   const [tab, setTab] = useState("produtos");
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Todas");
@@ -547,6 +561,20 @@ export default function App() {
       }
       return { ...prev, products, materials };
     });
+    if (direction < 0) {
+      const sale = {
+        productId: product.id,
+        productName: product.name,
+        productCode: product.code,
+        qty: amount,
+        unitPrice: Number(product.price) || 0,
+        total: (Number(product.price) || 0) * amount,
+        timestamp: Date.now(),
+      };
+      addSale(sale)
+        .then((saved) => setSales((prev) => (prev ? [saved, ...prev] : prev)))
+        .catch(() => {});
+    }
     setMoveAmounts((prevAmt) => ({ ...prevAmt, [product.id]: "" }));
   }
 
@@ -722,6 +750,16 @@ export default function App() {
             }}
           >
             Catálogo
+          </button>
+          <button
+            className="tab-btn"
+            style={{ ...styles.tabBtn, ...(tab === "vendas" ? styles.tabBtnActive : {}) }}
+            onClick={() => {
+              setTab("vendas");
+              if (sales === null) refreshSales();
+            }}
+          >
+            Vendas
           </button>
           <button
             className="tab-btn"
@@ -1035,8 +1073,10 @@ export default function App() {
               </div>
             )}
           </>
-        ) : (
+        ) : tab === "catalogo" ? (
           <CatalogoTab products={data ? data.products : []} loading={loading} query={query} setQuery={setQuery} />
+        ) : (
+          <VendasTab sales={sales} loading={salesLoading} onRefresh={refreshSales} />
         )}
 
         {saveError && <p style={styles.saveError}>Não foi possível salvar as alterações agora. Tente novamente.</p>}
@@ -1666,6 +1706,87 @@ export function CatalogPage() {
         <CatalogoTab products={products || []} loading={products === null} query={query} setQuery={setQuery} />
       </main>
     </div>
+  );
+}
+
+function VendasTab({ sales, loading, onRefresh }) {
+  const now = Date.now();
+  const DAY = 24 * 60 * 60 * 1000;
+
+  const totals = useMemo(() => {
+    if (!sales) return { today: 0, week: 0, month: 0, todayCount: 0, weekCount: 0, monthCount: 0 };
+    const startOfToday = new Date();
+    startOfToday.setHours(0, 0, 0, 0);
+    const todayTs = startOfToday.getTime();
+    const weekTs = now - 7 * DAY;
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+    const monthTs = startOfMonth.getTime();
+
+    let today = 0, week = 0, month = 0, todayCount = 0, weekCount = 0, monthCount = 0;
+    sales.forEach((s) => {
+      if (s.timestamp >= todayTs) {
+        today += s.total;
+        todayCount += s.qty;
+      }
+      if (s.timestamp >= weekTs) {
+        week += s.total;
+        weekCount += s.qty;
+      }
+      if (s.timestamp >= monthTs) {
+        month += s.total;
+        monthCount += s.qty;
+      }
+    });
+    return { today, week, month, todayCount, weekCount, monthCount };
+  }, [sales, now]);
+
+  function formatDate(ts) {
+    return new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  return (
+    <>
+      <section className="stats-grid" style={styles.statsGrid}>
+        <StatCard label="Vendido hoje" value={currency(totals.today)} />
+        <StatCard label="Vendido nos últimos 7 dias" value={currency(totals.week)} />
+        <StatCard label="Vendido este mês" value={currency(totals.month)} />
+      </section>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <button className="chip" style={styles.chip} onClick={onRefresh}>
+          atualizar
+        </button>
+      </div>
+
+      <section style={styles.tableWrap}>
+        <div className="table-head" style={{ ...styles.tableHead, gridTemplateColumns: "1.6fr 2fr 0.8fr 1fr" }}>
+          <span>Data</span>
+          <span>Produto</span>
+          <span style={styles.centerCol}>Qtd</span>
+          <span style={styles.rightCol}>Total</span>
+        </div>
+
+        {loading && <div style={styles.emptyState}>Carregando vendas…</div>}
+        {!loading && sales && sales.length === 0 && (
+          <div style={styles.emptyState}>Nenhuma venda registrada ainda. Toda vez que você registrar uma saída de produto, ela aparece aqui.</div>
+        )}
+        {!loading &&
+          sales &&
+          sales.map((s) => (
+            <div key={s.id} className="item-row row-hover" style={{ ...styles.itemRow, gridTemplateColumns: "1.6fr 2fr 0.8fr 1fr" }}>
+              <div style={{ fontSize: 12.5, color: "#8A7B6E" }}>{formatDate(s.timestamp)}</div>
+              <div>
+                <div style={styles.productName}>{s.productName}</div>
+                {s.productCode && <div style={styles.productCode}>{s.productCode}</div>}
+              </div>
+              <div style={{ ...styles.centerCol, fontWeight: 600 }}>{s.qty}</div>
+              <div style={{ ...styles.rightCol, fontWeight: 600 }}>{currency(s.total)}</div>
+            </div>
+          ))}
+      </section>
+    </>
   );
 }
 
