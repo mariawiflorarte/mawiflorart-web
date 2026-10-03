@@ -1,5 +1,19 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData, loginWithPassword, logout, watchAuthState, addSale, loadSales } from "./firebase.js";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import {
+  loadData,
+  saveData,
+  loginWithPassword,
+  logout,
+  watchAuthState,
+  addSale,
+  loadSales,
+  updateSale,
+  deleteSaleDoc,
+  addOrder,
+  updateOrder,
+  deleteOrderDoc,
+  loadOrders,
+} from "./firebase.js";
 
 import {
   Flower2,
@@ -189,6 +203,197 @@ export default function App() {
       setSalesLoading(false);
     }
   }
+
+  const [orders, setOrders] = useState(null);
+  const [ordersLoading, setOrdersLoading] = useState(false);
+  const [orderModal, setOrderModal] = useState(false);
+  const [orderForm, setOrderForm] = useState({ customerName: "", items: [] });
+  const [orderError, setOrderError] = useState("");
+
+  async function refreshOrders() {
+    setOrdersLoading(true);
+    try {
+      const result = await loadOrders();
+      setOrders(result);
+    } catch (e) {
+      setOrders((prev) => prev || []);
+    } finally {
+      setOrdersLoading(false);
+    }
+  }
+
+  function openOrderModal() {
+    setOrderForm({ customerName: "", items: [] });
+    setOrderError("");
+    setOrderModal(true);
+  }
+  function closeOrderModal() {
+    setOrderModal(false);
+  }
+  function addOrderItemRow() {
+    setOrderForm((f) => ({ ...f, items: [...f.items, { productId: "", qty: "" }] }));
+  }
+  function updateOrderItemRow(idx, field, value) {
+    setOrderForm((f) => {
+      const items = f.items.slice();
+      items[idx] = { ...items[idx], [field]: value };
+      return { ...f, items };
+    });
+  }
+  function removeOrderItemRow(idx) {
+    setOrderForm((f) => ({ ...f, items: f.items.filter((_, i) => i !== idx) }));
+  }
+
+  async function saveOrder() {
+    if (!orderForm.customerName.trim()) {
+      setOrderError("Informe o nome do cliente.");
+      return;
+    }
+    const validItems = orderForm.items.filter((it) => it.productId && Number(it.qty) > 0);
+    if (validItems.length === 0) {
+      setOrderError("Adicione pelo menos um item com quantidade.");
+      return;
+    }
+    const items = validItems.map((it) => {
+      const product = data.products.find((p) => p.id === it.productId);
+      return {
+        productId: it.productId,
+        productName: product ? product.name : "—",
+        qty: Number(it.qty),
+        unitPrice: product ? Number(product.price) || 0 : 0,
+      };
+    });
+    const total = items.reduce((s, it) => s + it.unitPrice * it.qty, 0);
+    const order = {
+      customerName: orderForm.customerName.trim(),
+      items,
+      total,
+      delivered: false,
+      paid: false,
+      createdAt: Date.now(),
+      deliveredAt: null,
+      materialsConsumed: null,
+      saleIds: [],
+    };
+    const saved = await addOrder(order);
+    setOrders((prev) => (prev ? [saved, ...prev] : [saved]));
+    closeOrderModal();
+  }
+
+  async function handleToggleDelivered(order) {
+    if (!order.delivered) {
+      // marcar como entregue: desconta estoque e matéria-prima, registra no histórico de vendas
+      const materialsAgg = {};
+      order.items.forEach((item) => {
+        const product = data.products.find((p) => p.id === item.productId);
+        if (product && product.recipe) {
+          product.recipe.forEach((ing) => {
+            const m = data.materials.find((mm) => mm.id === ing.materialId);
+            if (!m) return;
+            const consumed = ing.qty * item.qty;
+            if (!materialsAgg[m.id]) materialsAgg[m.id] = { materialId: m.id, name: m.name, consumed: 0, unit: m.unit };
+            materialsAgg[m.id].consumed += consumed;
+          });
+        }
+      });
+      const materialsConsumed = Object.values(materialsAgg);
+
+      updateData((prev) => {
+        const products = prev.products.map((p) => {
+          const item = order.items.find((it) => it.productId === p.id);
+          if (!item) return p;
+          return { ...p, qty: Math.max(0, Number(p.qty) - item.qty) };
+        });
+        let materials = prev.materials;
+        if (materialsConsumed.length) {
+          materials = prev.materials.map((m) => {
+            const c = materialsConsumed.find((mc) => mc.materialId === m.id);
+            if (!c) return m;
+            return { ...m, qty: Number(m.qty) - c.consumed };
+          });
+        }
+        return { ...prev, products, materials };
+      });
+
+      const savedSales = [];
+      for (const item of order.items) {
+        const product = data.products.find((p) => p.id === item.productId);
+        const sale = {
+          productId: item.productId,
+          productName: item.productName,
+          productCode: product ? product.code : "",
+          qty: item.qty,
+          unitPrice: item.unitPrice,
+          discount: 0,
+          total: item.unitPrice * item.qty,
+          timestamp: Date.now(),
+          materialsConsumed: [], // já contabilizado de forma agregada no pedido, evita descontar em dobro
+          customerName: order.customerName,
+        };
+        try {
+          const saved = await addSale(sale);
+          savedSales.push(saved);
+        } catch (e) {
+          // se uma venda falhar ao salvar, segue para as próximas — o estoque já foi ajustado
+        }
+      }
+      setSales((prev) => (prev ? [...savedSales, ...prev] : prev));
+
+      const updatedFields = { delivered: true, deliveredAt: Date.now(), materialsConsumed, saleIds: savedSales.map((s) => s.id) };
+      await updateOrder(order.id, updatedFields);
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, ...updatedFields } : o)));
+    } else {
+      // desmarcar entregue: devolve estoque/matéria-prima e remove as vendas geradas por esse pedido
+      updateData((prev) => {
+        const products = prev.products.map((p) => {
+          const item = order.items.find((it) => it.productId === p.id);
+          if (!item) return p;
+          return { ...p, qty: Number(p.qty) + item.qty };
+        });
+        let materials = prev.materials;
+        if (order.materialsConsumed && order.materialsConsumed.length) {
+          materials = prev.materials.map((m) => {
+            const c = order.materialsConsumed.find((mc) => mc.materialId === m.id);
+            if (!c) return m;
+            return { ...m, qty: Number(m.qty) + c.consumed };
+          });
+        }
+        return { ...prev, products, materials };
+      });
+      if (order.saleIds && order.saleIds.length) {
+        for (const sid of order.saleIds) {
+          try {
+            await deleteSaleDoc(sid);
+          } catch (e) {
+            // ignora — a venda pode já ter sido removida manualmente
+          }
+        }
+        setSales((prev) => (prev ? prev.filter((s) => !order.saleIds.includes(s.id)) : prev));
+      }
+      const updatedFields = { delivered: false, deliveredAt: null, materialsConsumed: null, saleIds: [] };
+      await updateOrder(order.id, updatedFields);
+      setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, ...updatedFields } : o)));
+    }
+  }
+
+  async function handleTogglePaid(order) {
+    const paid = !order.paid;
+    await updateOrder(order.id, { paid });
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, paid } : o)));
+  }
+
+  async function handleDeleteOrder(order) {
+    if (order.delivered) {
+      await handleToggleDelivered(order); // desfaz a entrega: devolve estoque e remove as vendas geradas
+    }
+    try {
+      await deleteOrderDoc(order.id);
+      setOrders((prev) => prev.filter((o) => o.id !== order.id));
+    } catch (e) {
+      // se der erro, o pedido continua na lista
+    }
+  }
+
   const [tab, setTab] = useState("produtos");
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Todas");
@@ -214,18 +419,16 @@ export default function App() {
   const [materialError, setMaterialError] = useState("");
   const [purchaseError, setPurchaseError] = useState("");
   const [photoUploading, setPhotoUploading] = useState(false);
+  const [cropSource, setCropSource] = useState(null); // { file, setForm }
 
-  async function handlePhotoChange(file, setForm) {
+  function handlePhotoChange(file, setForm) {
     if (!file) return;
-    setPhotoUploading(true);
-    try {
-      const dataUrl = await resizeImageFile(file);
-      setForm((f) => ({ ...f, photo: dataUrl }));
-    } catch (e) {
-      // silently ignore, keep previous photo
-    } finally {
-      setPhotoUploading(false);
-    }
+    setCropSource({ file, setForm });
+  }
+
+  function handleCropConfirm(dataUrl) {
+    if (cropSource) cropSource.setForm((f) => ({ ...f, photo: dataUrl }));
+    setCropSource(null);
   }
 
   useEffect(() => {
@@ -539,28 +742,36 @@ export default function App() {
   // ---------- movement logic: saída de produto consome matéria-prima via ficha técnica ----------
   function registerMovement(product, direction) {
     const amount = Number(moveAmounts[product.id]) > 0 ? Number(moveAmounts[product.id]) : 1;
+    let consumedSummary = [];
+    if (direction < 0 && product.recipe && product.recipe.length) {
+      consumedSummary = product.recipe
+        .map((ing) => {
+          const m = data.materials.find((mm) => mm.id === ing.materialId);
+          if (!m) return null;
+          const consumed = ing.qty * amount;
+          return { materialId: m.id, name: m.name, consumed, left: Number(m.qty) - consumed, unit: m.unit };
+        })
+        .filter(Boolean);
+    }
     updateData((prev) => {
       const products = prev.products.map((it) =>
         it.id === product.id ? { ...it, qty: Math.max(0, Number(it.qty) + direction * amount) } : it
       );
       let materials = prev.materials;
-      let consumedSummary = [];
-      if (direction < 0 && product.recipe && product.recipe.length) {
-        materials = prev.materials.map((m) => {
-          const ing = product.recipe.find((r) => r.materialId === m.id);
-          if (!ing) return m;
-          const consumed = ing.qty * amount;
-          consumedSummary.push({ name: m.name, consumed, left: Number(m.qty) - consumed, unit: m.unit });
-          return { ...m, qty: Number(m.qty) - consumed };
-        });
-      }
       if (consumedSummary.length) {
-        setSaleFeedback({ productName: product.name, amount, items: consumedSummary });
-      } else {
-        setSaleFeedback(null);
+        materials = prev.materials.map((m) => {
+          const c = consumedSummary.find((cs) => cs.materialId === m.id);
+          if (!c) return m;
+          return { ...m, qty: Number(m.qty) - c.consumed };
+        });
       }
       return { ...prev, products, materials };
     });
+    if (consumedSummary.length) {
+      setSaleFeedback({ productName: product.name, amount, items: consumedSummary });
+    } else {
+      setSaleFeedback(null);
+    }
     if (direction < 0) {
       const sale = {
         productId: product.id,
@@ -568,14 +779,49 @@ export default function App() {
         productCode: product.code,
         qty: amount,
         unitPrice: Number(product.price) || 0,
+        discount: 0,
         total: (Number(product.price) || 0) * amount,
         timestamp: Date.now(),
+        materialsConsumed: consumedSummary.map((c) => ({ materialId: c.materialId, name: c.name, consumed: c.consumed, unit: c.unit })),
       };
       addSale(sale)
         .then((saved) => setSales((prev) => (prev ? [saved, ...prev] : prev)))
         .catch(() => {});
     }
     setMoveAmounts((prevAmt) => ({ ...prevAmt, [product.id]: "" }));
+  }
+
+  async function handleDeleteSale(sale, restock) {
+    if (restock) {
+      updateData((prev) => {
+        const products = prev.products.map((p) =>
+          p.id === sale.productId ? { ...p, qty: Number(p.qty) + Number(sale.qty) } : p
+        );
+        let materials = prev.materials;
+        if (sale.materialsConsumed && sale.materialsConsumed.length) {
+          materials = prev.materials.map((m) => {
+            const c = sale.materialsConsumed.find((mc) => mc.materialId === m.id);
+            if (!c) return m;
+            return { ...m, qty: Number(m.qty) + Number(c.consumed) };
+          });
+        }
+        return { ...prev, products, materials };
+      });
+    }
+    try {
+      await deleteSaleDoc(sale.id);
+      setSales((prev) => (prev ? prev.filter((s) => s.id !== sale.id) : prev));
+    } catch (e) {
+      // se der erro, a venda continua na lista — a pessoa pode tentar de novo
+    }
+  }
+
+  async function handleSaveSaleEdit(id, qty, discount) {
+    const sale = (sales || []).find((s) => s.id === id);
+    if (!sale) return;
+    const total = Math.max(0, sale.unitPrice * qty - discount);
+    await updateSale(id, { qty, discount, total });
+    setSales((prev) => prev.map((s) => (s.id === id ? { ...s, qty, discount, total } : s)));
   }
 
   // ---------- compra de matéria-prima: recalcula custo médio ponderado ----------
@@ -710,10 +956,22 @@ export default function App() {
               <p style={styles.brandSub}>controle de estoque &amp; matéria-prima</p>
             </div>
           </div>
-          {tab !== "catalogo" && (
-            <button style={styles.addBtn} onClick={tab === "produtos" ? openAddProduct : openAddMaterial}>
+          {tab === "produtos" && (
+            <button style={styles.addBtn} onClick={openAddProduct}>
               <Plus size={18} />
-              {tab === "produtos" ? "Novo produto" : "Nova matéria-prima"}
+              Novo produto
+            </button>
+          )}
+          {tab === "materia-prima" && (
+            <button style={styles.addBtn} onClick={openAddMaterial}>
+              <Plus size={18} />
+              Nova matéria-prima
+            </button>
+          )}
+          {tab === "pedidos" && (
+            <button style={styles.addBtn} onClick={openOrderModal}>
+              <Plus size={18} />
+              Novo pedido
             </button>
           )}
         </div>
@@ -760,6 +1018,16 @@ export default function App() {
             }}
           >
             Vendas
+          </button>
+          <button
+            className="tab-btn"
+            style={{ ...styles.tabBtn, ...(tab === "pedidos" ? styles.tabBtnActive : {}) }}
+            onClick={() => {
+              setTab("pedidos");
+              if (orders === null) refreshOrders();
+            }}
+          >
+            Pedidos
           </button>
           <button
             className="tab-btn"
@@ -1074,9 +1342,30 @@ export default function App() {
             )}
           </>
         ) : tab === "catalogo" ? (
-          <CatalogoTab products={data ? data.products : []} loading={loading} query={query} setQuery={setQuery} />
+          <CatalogoTab
+            products={data ? data.products : []}
+            categories={data ? data.categories : DEFAULT_CATEGORIES}
+            loading={loading}
+            query={query}
+            setQuery={setQuery}
+          />
+        ) : tab === "vendas" ? (
+          <VendasTab
+            sales={sales}
+            loading={salesLoading}
+            onRefresh={refreshSales}
+            onDelete={handleDeleteSale}
+            onSaveEdit={handleSaveSaleEdit}
+          />
         ) : (
-          <VendasTab sales={sales} loading={salesLoading} onRefresh={refreshSales} />
+          <PedidosTab
+            orders={orders}
+            loading={ordersLoading}
+            onRefresh={refreshOrders}
+            onToggleDelivered={handleToggleDelivered}
+            onTogglePaid={handleTogglePaid}
+            onDelete={handleDeleteOrder}
+          />
         )}
 
         {saveError && <p style={styles.saveError}>Não foi possível salvar as alterações agora. Tente novamente.</p>}
@@ -1307,6 +1596,105 @@ export default function App() {
         </div>
       )}
 
+      {orderModal && (
+        <div style={styles.overlay} onClick={closeOrderModal}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>Novo pedido</h2>
+              <button type="button" style={styles.iconBtn} onClick={closeOrderModal} aria-label="Fechar">
+                <X size={18} />
+              </button>
+            </div>
+            <div style={styles.formGrid}>
+              <Field label="Cliente" full>
+                <input
+                  style={styles.input}
+                  value={orderForm.customerName}
+                  onChange={(e) => setOrderForm({ ...orderForm, customerName: e.target.value })}
+                  placeholder="nome do cliente"
+                />
+              </Field>
+            </div>
+
+            <div style={styles.recipeSection}>
+              <div style={styles.recipeSectionHeader}>
+                <span style={styles.fieldLabelText}>Itens do pedido</span>
+                <button type="button" style={styles.smallAddBtn} onClick={addOrderItemRow}>
+                  <Plus size={13} /> item
+                </button>
+              </div>
+              {orderForm.items.length === 0 && <p style={styles.hint}>Adicione os produtos que o cliente pediu.</p>}
+              {orderForm.items.map((row, idx) => {
+                const product = data ? data.products.find((p) => p.id === row.productId) : null;
+                const qty = Number(row.qty) || 0;
+                const subtotal = product ? Number(product.price || 0) * qty : 0;
+                return (
+                  <div key={idx} style={styles.recipeRowWrap}>
+                    <div style={styles.recipeRow}>
+                      <select
+                        style={{ ...styles.input, flex: 2 }}
+                        value={row.productId}
+                        onChange={(e) => updateOrderItemRow(idx, "productId", e.target.value)}
+                      >
+                        <option value="">Selecione…</option>
+                        {data &&
+                          [...data.products]
+                            .sort((a, b) => a.name.localeCompare(b.name, "pt-BR"))
+                            .map((p) => (
+                              <option key={p.id} value={p.id}>
+                                {p.name} ({currency(p.price)})
+                              </option>
+                            ))}
+                      </select>
+                      <input
+                        style={{ ...styles.input, flex: 1 }}
+                        type="number"
+                        min="1"
+                        placeholder="qtd"
+                        value={row.qty}
+                        onChange={(e) => updateOrderItemRow(idx, "qty", e.target.value)}
+                      />
+                      <button type="button" style={styles.iconBtn} onClick={() => removeOrderItemRow(idx)} aria-label="Remover item">
+                        <X size={14} />
+                      </button>
+                    </div>
+                    {product && qty > 0 && (
+                      <div style={styles.recipeRowCost}>
+                        {qty} × {currency(product.price)} = <strong>{currency(subtotal)}</strong>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {orderForm.items.length > 0 && (
+                <div style={styles.recipeTotalBox}>
+                  <span>Total do pedido</span>
+                  <strong>
+                    {currency(
+                      orderForm.items.reduce((s, row) => {
+                        const product = data ? data.products.find((p) => p.id === row.productId) : null;
+                        return s + (product ? Number(product.price || 0) * (Number(row.qty) || 0) : 0);
+                      }, 0)
+                    )}
+                  </strong>
+                </div>
+              )}
+            </div>
+
+            {orderError && <p style={styles.formError}>{orderError}</p>}
+
+            <div style={styles.modalActions}>
+              <button type="button" style={styles.secondaryBtn} onClick={closeOrderModal}>
+                Cancelar
+              </button>
+              <button type="button" style={styles.primaryBtn} onClick={saveOrder}>
+                Criar pedido
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {purchaseTarget && (
         <div style={styles.overlay} onClick={closePurchase}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -1363,6 +1751,10 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {cropSource && (
+        <PhotoCropModal file={cropSource.file} onCancel={() => setCropSource(null)} onConfirm={handleCropConfirm} />
       )}
 
       {categoryModal && (
@@ -1621,6 +2013,144 @@ function AreaCalcHelper({ onApply }) {
   );
 }
 
+const CROP_VIEWPORT = 260; // tamanho, em px, do quadrado de recorte mostrado na tela
+const CROP_OUTPUT = 360; // tamanho, em px, da foto final salva
+
+function PhotoCropModal({ file, onCancel, onConfirm }) {
+  const [imgUrl, setImgUrl] = useState(null);
+  const [natural, setNatural] = useState({ w: 0, h: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const dragRef = useRef(null); // { startX, startY, offsetX, offsetY }
+  const imgElRef = useRef(null);
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setImgUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  function onImgLoad(e) {
+    setNatural({ w: e.target.naturalWidth, h: e.target.naturalHeight });
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+  }
+
+  const baseScale = natural.w && natural.h ? Math.max(CROP_VIEWPORT / natural.w, CROP_VIEWPORT / natural.h) : 1;
+  const effectiveScale = baseScale * zoom;
+  const displayedW = natural.w * effectiveScale;
+  const displayedH = natural.h * effectiveScale;
+  const maxOffsetX = Math.max(0, (displayedW - CROP_VIEWPORT) / 2);
+  const maxOffsetY = Math.max(0, (displayedH - CROP_VIEWPORT) / 2);
+
+  function clampOffset(o) {
+    return {
+      x: Math.min(maxOffsetX, Math.max(-maxOffsetX, o.x)),
+      y: Math.min(maxOffsetY, Math.max(-maxOffsetY, o.y)),
+    };
+  }
+
+  function onPointerDown(e) {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startY: e.clientY, offsetX: offset.x, offsetY: offset.y };
+    e.target.setPointerCapture && e.target.setPointerCapture(e.pointerId);
+  }
+  function onPointerMove(e) {
+    if (!dragRef.current) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    setOffset(clampOffset({ x: dragRef.current.offsetX + dx, y: dragRef.current.offsetY + dy }));
+  }
+  function onPointerUp() {
+    dragRef.current = null;
+  }
+
+  function handleZoomChange(e) {
+    const newZoom = Number(e.target.value);
+    setZoom(newZoom);
+    // recalcula o offset máximo permitido pro novo zoom, mantendo dentro dos limites
+    const newScale = baseScale * newZoom;
+    const newDW = natural.w * newScale;
+    const newDH = natural.h * newScale;
+    const mx = Math.max(0, (newDW - CROP_VIEWPORT) / 2);
+    const my = Math.max(0, (newDH - CROP_VIEWPORT) / 2);
+    setOffset((o) => ({ x: Math.min(mx, Math.max(-mx, o.x)), y: Math.min(my, Math.max(-my, o.y)) }));
+  }
+
+  function confirmCrop() {
+    if (!imgElRef.current || !natural.w) return;
+    // posição do canto superior-esquerdo da imagem dentro do viewport
+    const imgLeft = (CROP_VIEWPORT - displayedW) / 2 + offset.x;
+    const imgTop = (CROP_VIEWPORT - displayedH) / 2 + offset.y;
+    // região visível (0,0 a CROP_VIEWPORT,CROP_VIEWPORT) convertida para coordenadas da imagem original
+    let sx = (0 - imgLeft) / effectiveScale;
+    let sy = (0 - imgTop) / effectiveScale;
+    let sSize = CROP_VIEWPORT / effectiveScale;
+    sx = Math.max(0, Math.min(sx, natural.w - sSize));
+    sy = Math.max(0, Math.min(sy, natural.h - sSize));
+
+    const canvas = document.createElement("canvas");
+    canvas.width = CROP_OUTPUT;
+    canvas.height = CROP_OUTPUT;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(imgElRef.current, sx, sy, sSize, sSize, 0, 0, CROP_OUTPUT, CROP_OUTPUT);
+    onConfirm(canvas.toDataURL("image/jpeg", 0.75));
+  }
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h2 style={styles.modalTitle}>Ajustar foto</h2>
+          <button type="button" style={styles.iconBtn} onClick={onCancel} aria-label="Fechar">
+            <X size={18} />
+          </button>
+        </div>
+        <p style={styles.hint}>Arraste a foto para posicionar e use o controle abaixo para dar zoom.</p>
+        <div
+          style={styles.cropViewport}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerLeave={onPointerUp}
+        >
+          {imgUrl && (
+            <img
+              ref={imgElRef}
+              src={imgUrl}
+              alt=""
+              onLoad={onImgLoad}
+              draggable={false}
+              style={{
+                position: "absolute",
+                left: "50%",
+                top: "50%",
+                width: displayedW || "auto",
+                height: displayedH || "auto",
+                transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px))`,
+                userSelect: "none",
+                pointerEvents: "none",
+              }}
+            />
+          )}
+        </div>
+        <div style={styles.cropZoomRow}>
+          <span style={{ fontSize: 11, color: "#B0A599" }}>zoom</span>
+          <input type="range" min="1" max="3" step="0.05" value={zoom} onChange={handleZoomChange} style={{ flex: 1 }} />
+        </div>
+        <div style={styles.modalActions}>
+          <button type="button" style={styles.secondaryBtn} onClick={onCancel}>
+            Cancelar
+          </button>
+          <button type="button" style={styles.primaryBtn} onClick={confirmCrop} disabled={!natural.w}>
+            Usar foto
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PhotoPicker({ photo, uploading, onChange, onRemove }) {
   const inputId = useMemo(() => "photo-" + Math.random().toString(36).slice(2, 9), []);
   return (
@@ -1660,6 +2190,7 @@ function PhotoPicker({ photo, uploading, onChange, onRemove }) {
 
 export function CatalogPage() {
   const [products, setProducts] = useState(null);
+  const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [query, setQuery] = useState("");
 
   useEffect(() => {
@@ -1667,7 +2198,10 @@ export function CatalogPage() {
     (async () => {
       try {
         const result = await loadData();
-        if (!cancelled) setProducts(result ? result.products : []);
+        if (!cancelled) {
+          setProducts(result ? result.products : []);
+          if (result && result.categories && result.categories.length) setCategories(result.categories);
+        }
       } catch (e) {
         if (!cancelled) setProducts([]);
       }
@@ -1703,15 +2237,150 @@ export function CatalogPage() {
         </div>
       </header>
       <main style={styles.main}>
-        <CatalogoTab products={products || []} loading={products === null} query={query} setQuery={setQuery} />
+        <CatalogoTab products={products || []} categories={categories} loading={products === null} query={query} setQuery={setQuery} />
       </main>
     </div>
   );
 }
 
-function VendasTab({ sales, loading, onRefresh }) {
+function PedidosTab({ orders, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
+  const [pendingOnly, setPendingOnly] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  const filtered = (orders || []).filter((o) => (pendingOnly ? !o.delivered : true));
+
+  function formatDate(ts) {
+    return new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
+  }
+
+  async function handleToggle(fn, order) {
+    setBusyId(order.id);
+    try {
+      await fn(order);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function confirmDelete() {
+    setBusyId(deleteTarget.id);
+    try {
+      await onDelete(deleteTarget);
+    } finally {
+      setBusyId(null);
+      setDeleteTarget(null);
+    }
+  }
+
+  return (
+    <>
+      <div style={styles.toolbar}>
+        <div style={styles.chipRow}>
+          <button
+            className="chip"
+            style={{ ...styles.chip, ...(!pendingOnly ? styles.chipActive : {}) }}
+            onClick={() => setPendingOnly(false)}
+          >
+            Todos
+          </button>
+          <button
+            className="chip"
+            style={{ ...styles.chip, ...(pendingOnly ? styles.chipWarnActive : {}) }}
+            onClick={() => setPendingOnly(true)}
+          >
+            Só pendentes
+          </button>
+          <button className="chip" style={styles.chip} onClick={onRefresh}>
+            atualizar
+          </button>
+        </div>
+      </div>
+
+      {loading && <div style={styles.emptyState}>Carregando pedidos…</div>}
+      {!loading && filtered.length === 0 && (
+        <div style={styles.emptyState}>Nenhum pedido por aqui. Clique em "Novo pedido" para começar.</div>
+      )}
+
+      {!loading &&
+        filtered.map((o) => (
+          <div key={o.id} style={styles.orderCard}>
+            <div style={styles.orderCardHeader}>
+              <div>
+                <div style={styles.productName}>{o.customerName}</div>
+                <div style={styles.productCode}>{formatDate(o.createdAt)}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ ...styles.catalogCardPrice, fontSize: 17 }}>{currency(o.total)}</div>
+              </div>
+            </div>
+
+            <div style={styles.orderItemsList}>
+              {o.items.map((item, i) => (
+                <div key={i} style={styles.orderItemRow}>
+                  <span>
+                    {item.qty}x {item.productName}
+                  </span>
+                  <span>{currency(item.unitPrice * item.qty)}</span>
+                </div>
+              ))}
+            </div>
+
+            <div style={styles.orderCardFooter}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="chip"
+                  style={{ ...styles.chip, ...(o.delivered ? styles.chipActive : {}) }}
+                  onClick={() => handleToggle(onToggleDelivered, o)}
+                  disabled={busyId === o.id}
+                >
+                  {o.delivered ? "✓ Entregue" : "Marcar entregue"}
+                </button>
+                <button
+                  className="chip"
+                  style={{ ...styles.chip, ...(o.paid ? styles.chipActive : {}) }}
+                  onClick={() => handleToggle(onTogglePaid, o)}
+                  disabled={busyId === o.id}
+                >
+                  {o.paid ? "✓ Pago" : "Marcar pago"}
+                </button>
+              </div>
+              <button style={{ ...styles.iconBtn, color: "#B15768" }} onClick={() => setDeleteTarget(o)} aria-label="Excluir pedido">
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+        ))}
+
+      {deleteTarget && (
+        <div style={styles.overlay} onClick={() => setDeleteTarget(null)}>
+          <div style={styles.confirmBox} onClick={(e) => e.stopPropagation()}>
+            <p style={styles.confirmText}>
+              Excluir o pedido de {deleteTarget.customerName}?
+              {deleteTarget.delivered ? " Como já estava marcado como entregue, o estoque será devolvido automaticamente." : ""}
+            </p>
+            <div style={styles.modalActions}>
+              <button style={styles.secondaryBtn} onClick={() => setDeleteTarget(null)}>
+                Cancelar
+              </button>
+              <button style={styles.dangerBtn} onClick={confirmDelete}>
+                Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function VendasTab({ sales, loading, onRefresh, onDelete, onSaveEdit }) {
   const now = Date.now();
   const DAY = 24 * 60 * 60 * 1000;
+  const [editingSale, setEditingSale] = useState(null); // { id, qty, discount }
+  const [editSaving, setEditSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState(null); // sale object
+  const [restockOnDelete, setRestockOnDelete] = useState(true);
 
   const totals = useMemo(() => {
     if (!sales) return { today: 0, week: 0, month: 0, todayCount: 0, weekCount: 0, monthCount: 0 };
@@ -1746,6 +2415,26 @@ function VendasTab({ sales, loading, onRefresh }) {
     return new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
   }
 
+  function openEdit(s) {
+    setEditingSale({ id: s.id, qty: String(s.qty), discount: String(s.discount || 0) });
+  }
+
+  async function confirmEdit() {
+    setEditSaving(true);
+    try {
+      await onSaveEdit(editingSale.id, Number(editingSale.qty) || 0, Number(editingSale.discount) || 0);
+      setEditingSale(null);
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function confirmDelete() {
+    await onDelete(deleteTarget, restockOnDelete);
+    setDeleteTarget(null);
+    setRestockOnDelete(true);
+  }
+
   return (
     <>
       <section className="stats-grid" style={styles.statsGrid}>
@@ -1761,11 +2450,12 @@ function VendasTab({ sales, loading, onRefresh }) {
       </div>
 
       <section style={styles.tableWrap}>
-        <div className="table-head" style={{ ...styles.tableHead, gridTemplateColumns: "1.6fr 2fr 0.8fr 1fr" }}>
+        <div className="table-head" style={{ ...styles.tableHead, gridTemplateColumns: "1.5fr 1.8fr 0.7fr 1fr 0.9fr" }}>
           <span>Data</span>
           <span>Produto</span>
           <span style={styles.centerCol}>Qtd</span>
           <span style={styles.rightCol}>Total</span>
+          <span style={styles.rightCol}>Ações</span>
         </div>
 
         {loading && <div style={styles.emptyState}>Carregando vendas…</div>}
@@ -1775,24 +2465,106 @@ function VendasTab({ sales, loading, onRefresh }) {
         {!loading &&
           sales &&
           sales.map((s) => (
-            <div key={s.id} className="item-row row-hover" style={{ ...styles.itemRow, gridTemplateColumns: "1.6fr 2fr 0.8fr 1fr" }}>
+            <div key={s.id} className="item-row row-hover" style={{ ...styles.itemRow, gridTemplateColumns: "1.5fr 1.8fr 0.7fr 1fr 0.9fr" }}>
               <div style={{ fontSize: 12.5, color: "#8A7B6E" }}>{formatDate(s.timestamp)}</div>
               <div>
                 <div style={styles.productName}>{s.productName}</div>
                 {s.productCode && <div style={styles.productCode}>{s.productCode}</div>}
+                {s.discount > 0 && <div style={styles.recipeTag}>desconto {currency(s.discount)}</div>}
               </div>
               <div style={{ ...styles.centerCol, fontWeight: 600 }}>{s.qty}</div>
               <div style={{ ...styles.rightCol, fontWeight: 600 }}>{currency(s.total)}</div>
+              <div style={{ ...styles.rightCol, display: "flex", gap: 6, justifyContent: "flex-end" }}>
+                <button style={styles.iconBtn} onClick={() => openEdit(s)} aria-label="Editar">
+                  <Pencil size={14} />
+                </button>
+                <button style={{ ...styles.iconBtn, color: "#B15768" }} onClick={() => setDeleteTarget(s)} aria-label="Excluir">
+                  <Trash2 size={14} />
+                </button>
+              </div>
             </div>
           ))}
       </section>
+
+      {editingSale && (
+        <div style={styles.overlay} onClick={() => setEditingSale(null)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>Editar venda</h2>
+              <button type="button" style={styles.iconBtn} onClick={() => setEditingSale(null)} aria-label="Fechar">
+                <X size={18} />
+              </button>
+            </div>
+            <div style={styles.formGrid}>
+              <Field label="Quantidade">
+                <input
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  value={editingSale.qty}
+                  onChange={(e) => setEditingSale({ ...editingSale, qty: e.target.value })}
+                />
+              </Field>
+              <Field label="Desconto (R$)">
+                <input
+                  style={styles.input}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={editingSale.discount}
+                  onChange={(e) => setEditingSale({ ...editingSale, discount: e.target.value })}
+                />
+              </Field>
+            </div>
+            <p style={styles.hint}>
+              Corrige apenas o registro da venda (quantidade e valor). Isso não altera o estoque — se a
+              venda foi cancelada de vez, use "Excluir" em vez de editar.
+            </p>
+            <div style={styles.modalActions}>
+              <button type="button" style={styles.secondaryBtn} onClick={() => setEditingSale(null)}>
+                Cancelar
+              </button>
+              <button type="button" style={styles.primaryBtn} onClick={confirmEdit} disabled={editSaving}>
+                {editSaving ? "Salvando…" : "Salvar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div style={styles.overlay} onClick={() => setDeleteTarget(null)}>
+          <div style={styles.confirmBox} onClick={(e) => e.stopPropagation()}>
+            <p style={styles.confirmText}>
+              Excluir a venda de {deleteTarget.qty}x {deleteTarget.productName}? Essa ação não pode ser
+              desfeita.
+            </p>
+            <label style={styles.catalogToggle}>
+              <input type="checkbox" checked={restockOnDelete} onChange={(e) => setRestockOnDelete(e.target.checked)} />
+              Devolver ao estoque (produto e matéria-prima usados nessa venda)
+            </label>
+            <div style={styles.modalActions}>
+              <button style={styles.secondaryBtn} onClick={() => setDeleteTarget(null)}>
+                Cancelar
+              </button>
+              <button style={styles.dangerBtn} onClick={confirmDelete}>
+                Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-function CatalogoTab({ products, loading, query, setQuery }) {
+function CatalogoTab({ products, loading, query, setQuery, categories }) {
+  const [activeCategory, setActiveCategory] = useState("Todas");
+  const [lightboxPhoto, setLightboxPhoto] = useState(null);
+
   const filtered = (products || [])
     .filter((p) => p.showInCatalog !== false)
+    .filter((p) => activeCategory === "Todas" || p.category === activeCategory)
     .filter((p) => {
       if (query.trim() && !p.name.toLowerCase().includes(query.toLowerCase())) return false;
       return true;
@@ -1803,7 +2575,33 @@ function CatalogoTab({ products, loading, query, setQuery }) {
       <div style={styles.catalogIntro}>
         Esta é a visão que seus clientes veem — sem custos nem estoque, só nome, foto e preço.
       </div>
-      <Toolbar query={query} setQuery={setQuery} showLowOnly={false} setShowLowOnly={() => {}} />
+      <Toolbar
+        query={query}
+        setQuery={setQuery}
+        showLowOnly={false}
+        setShowLowOnly={() => {}}
+        chips={
+          <>
+            <button
+              className="chip"
+              style={{ ...styles.chip, ...(activeCategory === "Todas" ? styles.chipActive : {}) }}
+              onClick={() => setActiveCategory("Todas")}
+            >
+              Todas
+            </button>
+            {(categories || DEFAULT_CATEGORIES).map((c) => (
+              <button
+                key={c}
+                className="chip"
+                style={{ ...styles.chip, ...(activeCategory === c ? styles.chipActive : {}) }}
+                onClick={() => setActiveCategory(c)}
+              >
+                {c}
+              </button>
+            ))}
+          </>
+        }
+      />
       {loading ? (
         <div style={styles.emptyState}>Carregando…</div>
       ) : filtered.length === 0 ? (
@@ -1812,7 +2610,10 @@ function CatalogoTab({ products, loading, query, setQuery }) {
         <section className="grid" style={styles.catalogGrid}>
           {filtered.map((p) => (
             <div key={p.id} style={styles.catalogCard}>
-              <div style={styles.catalogCardImg}>
+              <div
+                style={{ ...styles.catalogCardImg, cursor: p.photo ? "zoom-in" : "default" }}
+                onClick={() => p.photo && setLightboxPhoto({ src: p.photo, name: p.name })}
+              >
                 {p.photo ? <img src={p.photo} alt={p.name} style={styles.catalogCardPhoto} /> : <Flower2 size={26} color="#D9C3C8" />}
               </div>
               <div style={styles.catalogCardBody}>
@@ -1828,6 +2629,15 @@ function CatalogoTab({ products, loading, query, setQuery }) {
             </div>
           ))}
         </section>
+      )}
+
+      {lightboxPhoto && (
+        <div style={styles.lightboxOverlay} onClick={() => setLightboxPhoto(null)}>
+          <button style={styles.lightboxClose} onClick={() => setLightboxPhoto(null)} aria-label="Fechar">
+            <X size={22} />
+          </button>
+          <img src={lightboxPhoto.src} alt={lightboxPhoto.name} style={styles.lightboxImg} onClick={(e) => e.stopPropagation()} />
+        </div>
       )}
     </>
   );
@@ -1963,6 +2773,16 @@ const styles = {
   catalogCardFooter: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   catalogCardPrice: { fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", fontWeight: 500, fontSize: 15, color: "#5C5049" },
   catalogWaBtn: { width: 26, height: 26, borderRadius: "50%", border: "1px solid #E5DAD3", background: "transparent", color: "#A8687A", display: "inline-flex", alignItems: "center", justifyContent: "center" },
+  lightboxOverlay: { position: "fixed", inset: 0, background: "rgba(30,25,22,0.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 80, cursor: "zoom-out" },
+  lightboxImg: { maxWidth: "92vw", maxHeight: "88vh", objectFit: "contain", borderRadius: 4, cursor: "default" },
+  lightboxClose: { position: "fixed", top: 18, right: 18, background: "rgba(255,255,255,0.12)", border: "none", borderRadius: "50%", width: 40, height: 40, color: "#FFF", display: "flex", alignItems: "center", justifyContent: "center" },
+  orderCard: { background: "#FEFCFA", border: "1px solid #E5DAD3", borderRadius: 6, padding: "16px 18px", marginBottom: 14 },
+  orderCardHeader: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 },
+  orderItemsList: { borderTop: "1px solid #F0E8E1", borderBottom: "1px solid #F0E8E1", padding: "8px 0", marginBottom: 12, display: "flex", flexDirection: "column", gap: 4 },
+  orderItemRow: { display: "flex", justifyContent: "space-between", fontSize: 13, color: "#5C5049" },
+  orderCardFooter: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 },
+  cropViewport: { width: 260, height: 260, margin: "0 auto", borderRadius: 8, overflow: "hidden", position: "relative", background: "#F0E8E1", border: "1px solid #E5DAD3", cursor: "grab", touchAction: "none" },
+  cropZoomRow: { display: "flex", alignItems: "center", gap: 10, maxWidth: 260, margin: "16px auto 0" },
   authPage: { minHeight: "100vh", background: "#FEFCFA", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Jost', sans-serif" },
   authBox: { display: "flex", flexDirection: "column", alignItems: "center", gap: 12, background: "#FFFFFF", border: "1px solid #E5DAD3", borderRadius: 10, padding: "40px 36px", width: "100%", maxWidth: 320 },
   authTitle: { fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", fontWeight: 500, fontSize: 24, color: "#4A3F38", margin: 0 },

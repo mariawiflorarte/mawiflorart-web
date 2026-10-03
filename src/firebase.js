@@ -138,7 +138,37 @@ export async function addSale(sale) {
   return { id: docRef.id, ...sale };
 }
 
+export async function updateSale(id, fields) {
+  await setDoc(doc(db, "sales", id), fields, { merge: true });
+}
+
+export async function deleteSaleDoc(id) {
+  await deleteDoc(doc(db, "sales", id));
+}
+
 export async function loadSales() {
   const snap = await getDocs(query(SALES_COL, orderBy("timestamp", "desc")));
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}
+
+// Pedidos: cliente + itens, com dois marcadores independentes (entregue / pago).
+// O estoque só é descontado quando o pedido é marcado como entregue.
+const ORDERS_COL = collection(db, "orders");
+
+export async function addOrder(order) {
+  const docRef = await addDoc(ORDERS_COL, order);
+  return { id: docRef.id, ...order };
+}
+
+export async function updateOrder(id, fields) {
+  await setDoc(doc(db, "orders", id), fields, { merge: true });
+}
+
+export async function deleteOrderDoc(id) {
+  await deleteDoc(doc(db, "orders", id));
+}
+
+export async function loadOrders() {
+  const snap = await getDocs(query(ORDERS_COL, orderBy("createdAt", "desc")));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
