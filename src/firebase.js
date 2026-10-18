@@ -193,3 +193,14 @@ export async function loadClients() {
   const snap = await getDocs(CLIENTS_COL);
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
+
+// Configurações da conta (chave Pix, mensagem de parabéns): ficam salvas no
+// Firebase para aparecerem em todos os aparelhos. Só com login.
+export async function loadSettings() {
+  const snap = await getDoc(doc(db, "settings", "main"));
+  return snap.exists() ? snap.data() : null;
+}
+
+export async function saveSettings(settings) {
+  await setDoc(doc(db, "settings", "main"), settings, { merge: true });
+}

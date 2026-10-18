@@ -14,6 +14,8 @@ import {
   deleteOrderDoc,
   loadOrders,
   loadClients,
+  loadSettings,
+  saveSettings,
   addClient,
   updateClient,
   deleteClientDoc,
@@ -56,6 +58,8 @@ function getCategoryIcon(name) {
 }
 
 const STORAGE_KEY = "mawiflorart:data";
+const DEFAULT_BDAY_MSG =
+  "Olá, {nome}! Passando para desejar um feliz aniversário. Que o seu novo ciclo venha cheio de saúde, alegria e muitas flores pelo caminho.\n\nObrigada por fazer parte da história da MawiFlorart.\n\nUm abraço e um ótimo dia!\n\nMawiFlorart";
 const WHATSAPP_NUMBER = "5543999475765"; // 43 99947-5765
 
 function whatsappLink(productName) {
@@ -224,6 +228,19 @@ export default function App() {
     } finally {
       setOrdersLoading(false);
     }
+  }
+
+  const [settings, setSettings] = useState({ pixKey: "", bdayMsg: "" });
+  const settingsTimer = useRef(null);
+  function changeSettings(patch) {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch };
+      clearTimeout(settingsTimer.current);
+      settingsTimer.current = setTimeout(() => {
+        saveSettings(next).catch(() => {});
+      }, 800);
+      return next;
+    });
   }
 
   const [clients, setClients] = useState(null);
@@ -433,6 +450,11 @@ export default function App() {
   }
 
   const [tab, setTab] = useState("inicio");
+  useEffect(() => {
+    if (authUser) {
+      loadSettings().then((st) => st && setSettings((prev) => ({ ...prev, ...st }))).catch(() => {});
+    }
+  }, [authUser]);
   useEffect(() => {
     if (tab === "inicio" && authUser) {
       if (sales === null) refreshSales();
@@ -1442,6 +1464,8 @@ export default function App() {
           />
         ) : tab === "clientes" ? (
           <ClientesTab
+            settings={settings}
+            onChangeSettings={changeSettings}
             clients={clients}
             orders={orders}
             loading={clientsLoading || clients === null}
@@ -1453,6 +1477,8 @@ export default function App() {
           />
         ) : (
           <PedidosTab
+            settings={settings}
+            onChangeSettings={changeSettings}
             orders={orders}
             clients={clients}
             loading={ordersLoading}
@@ -2166,10 +2192,14 @@ function parseBirthday(t) {
   return { day, month };
 }
 
-function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, modal, setModal }) {
+function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, modal, setModal, settings, onChangeSettings }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("todas"); // todas | aniv | inativas
   const INACTIVE_DAYS = 60;
+  const bdayMsg = (settings && settings.bdayMsg) || DEFAULT_BDAY_MSG;
+  const [editMsg, setEditMsg] = useState(false);
+  const changeBdayMsg = (v) => onChangeSettings({ bdayMsg: v });
+  const bdayText = (c) => bdayMsg.split("{nome}").join((c.name || "").trim().split(" ")[0]);
   const [openId, setOpenId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [error, setError] = useState("");
@@ -2269,6 +2299,27 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
         </div>
       </div>
 
+      <div style={{ marginBottom: 14 }}>
+        <button className="chip" style={styles.chip} onClick={() => setEditMsg((v) => !v)}>
+          {editMsg ? "fechar mensagem de parabéns" : "editar mensagem de parabéns"}
+        </button>
+        {editMsg && (
+          <div style={{ marginTop: 8 }}>
+            <textarea
+              style={{ ...styles.input, width: "100%", boxSizing: "border-box", minHeight: 150, resize: "vertical", fontFamily: "inherit" }}
+              value={bdayMsg}
+              onChange={(e) => changeBdayMsg(e.target.value)}
+            />
+            <div style={{ fontSize: 12, color: "#B0A599", marginTop: 4 }}>
+              Escreva do seu jeito. <strong>{"{nome}"}</strong> vira o primeiro nome da cliente. Pode incluir um mimo ou desconto, se quiser. A mensagem fica salva na sua conta e aparece em todos os aparelhos.{" "}
+              <button style={{ border: "none", background: "transparent", color: "#A8687A", textDecoration: "underline", cursor: "pointer", padding: 0, fontSize: 12 }} onClick={() => changeBdayMsg(DEFAULT_BDAY_MSG)}>
+                voltar ao texto original
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
       {loading && <div style={styles.emptyState}>Carregando clientes…</div>}
       {!loading && rows.length === 0 && (
         <div style={styles.emptyState}>Nenhuma cliente por aqui. Clique em "Nova cliente" para começar.</div>
@@ -2320,17 +2371,17 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
                 )}
                 {c.phone && birthMonth && (
                   <a
-                    href={waLink(c.phone, `Oi, ${c.name.split(" ")[0]}! Feliz aniversário! 🎂🌸 Que seu dia seja lindo! Um beijo da MawiFlorart.`)}
+                    href={waLink(c.phone, bdayText(c))}
                     target="_blank"
                     rel="noreferrer"
                     style={styles.clientWaBtn}
                   >
-                    🎂 Dar parabéns
+                    Dar parabéns
                   </a>
                 )}
                 {c.phone && inactive && (
                   <a
-                    href={waLink(c.phone, `Oi, ${c.name.split(" ")[0]}! Tudo bem? Aqui é da MawiFlorart 🌸 Faz um tempinho que não conversamos — temos novidades no catálogo, quer dar uma olhadinha?`)}
+                    href={waLink(c.phone, `Olá, ${c.name.trim().split(" ")[0]}! Tudo bem? Aqui é da MawiFlorart. Faz um tempo que não conversamos e temos novidades no catálogo. Gostaria de dar uma olhada?`)}
                     target="_blank"
                     rel="noreferrer"
                     style={styles.clientWaBtn}
@@ -2821,25 +2872,20 @@ export function CatalogPage() {
   );
 }
 
-function PedidosTab({ orders, clients, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
-  const [pixKey, setPixKey] = useState(() => {
-    try { return localStorage.getItem("mawi_pix") || ""; } catch (e) { return ""; }
-  });
-  function changePix(v) {
-    setPixKey(v);
-    try { localStorage.setItem("mawi_pix", v); } catch (e) {}
-  }
+function PedidosTab({ settings, onChangeSettings, orders, clients, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
+  const pixKey = (settings && settings.pixKey) || "";
+  const changePix = (v) => onChangeSettings({ pixKey: v });
   function summaryLink(o) {
     const lines = [
-      `Olá, ${(o.customerName || "").split(" ")[0]}! Segue o resumo do seu pedido na MawiFlorart 🌸`,
+      `Olá, ${(o.customerName || "").trim().split(" ")[0]}! Segue o resumo do seu pedido na MawiFlorart.`,
       "",
-      ...(o.items || []).map((i) => `• ${i.qty}x ${i.productName} — ${currency(i.unitPrice * i.qty)}`),
+      ...(o.items || []).map((i) => `- ${i.qty}x ${i.productName}: ${currency(i.unitPrice * i.qty)}`),
       "",
       `Total: ${currency(o.total)}`,
     ];
-    if (o.paid) lines.push("Pagamento: confirmado ✓");
-    else if (pixKey.trim()) lines.push(`Pix: ${pixKey.trim()}`);
-    lines.push("", "Obrigada pela preferência! 💗");
+    if (o.paid) lines.push("Pagamento: confirmado.");
+    else if (pixKey.trim()) lines.push("", "Pagamento via Pix", `Chave: ${pixKey.trim()}`);
+    lines.push("", "Obrigada pela preferência.", "Um abraço, MawiFlorart");
     const text = encodeURIComponent(lines.join("\n"));
     const norm = (t) => (t || "").trim().toLowerCase();
     const client = (clients || []).find((c) => (o.clientId && c.id === o.clientId) || norm(c.name) === norm(o.customerName));
@@ -2902,7 +2948,7 @@ function PedidosTab({ orders, clients, loading, onRefresh, onToggleDelivered, on
 
       <div style={{ ...styles.searchWrap, marginBottom: 14 }}>
         <span style={{ ...styles.fieldLabelText, whiteSpace: "nowrap" }}>Minha chave Pix</span>
-        <input style={styles.searchInput} placeholder="aparece no resumo enviado à cliente (fica salva neste aparelho)" value={pixKey} onChange={(e) => changePix(e.target.value)} />
+        <input style={styles.searchInput} placeholder="aparece no resumo enviado à cliente (fica salva na sua conta)" value={pixKey} onChange={(e) => changePix(e.target.value)} />
       </div>
 
       {loading && <div style={styles.emptyState}>Carregando pedidos…</div>}
