@@ -1014,7 +1014,7 @@ export default function App() {
             </button>
           )}
           {tab === "clientes" && (
-            <button style={styles.addBtn} onClick={() => setClientModal({ id: null, form: { name: "", phone: "", city: "", notes: "" } })}>
+            <button style={styles.addBtn} onClick={() => setClientModal({ id: null, form: { name: "", phone: "", birthday: "", city: "", notes: "" } })}>
               <Plus size={18} />
               Nova cliente
             </button>
@@ -1083,6 +1083,7 @@ export default function App() {
             onClick={() => {
               setTab("pedidos");
               if (orders === null) refreshOrders();
+              if (clients === null) refreshClients();
             }}
           >
             Pedidos
@@ -1453,6 +1454,7 @@ export default function App() {
         ) : (
           <PedidosTab
             orders={orders}
+            clients={clients}
             loading={ordersLoading}
             onRefresh={refreshOrders}
             onToggleDelivered={handleToggleDelivered}
@@ -2156,8 +2158,18 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
   );
 }
 
+function parseBirthday(t) {
+  const m = /^\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})/.exec(t || "");
+  if (!m) return null;
+  const day = Number(m[1]), month = Number(m[2]);
+  if (day < 1 || day > 31 || month < 1 || month > 12) return null;
+  return { day, month };
+}
+
 function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, modal, setModal }) {
   const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState("todas"); // todas | aniv | inativas
+  const INACTIVE_DAYS = 60;
   const [openId, setOpenId] = useState(null);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [error, setError] = useState("");
@@ -2173,25 +2185,43 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
       .filter((c) => !q || norm(c.name).includes(q) || (c.phone || "").includes(q) || norm(c.city).includes(q))
       .map((c) => {
         const os = ordersOf(c);
+        const last = os.reduce((m, o) => Math.max(m, Number(o.createdAt) || 0), 0);
+        const daysSince = last ? Math.floor((Date.now() - last) / 86400000) : null;
+        const bd = parseBirthday(c.birthday);
+        const today = new Date();
+        const birthMonth = !!bd && bd.month === today.getMonth() + 1;
+        const birthToday = birthMonth && bd.day === today.getDate();
         return {
           c,
           os,
+          daysSince,
+          bd,
+          birthMonth,
+          birthToday,
+          inactive: daysSince !== null && daysSince >= INACTIVE_DAYS,
           total: os.reduce((a, o) => a + (Number(o.total) || 0), 0),
           pending: os.filter((o) => !o.delivered).length,
           toPay: os.filter((o) => o.delivered && !o.paid).reduce((a, o) => a + (Number(o.total) || 0), 0),
         };
       })
-      .sort((a, b) => a.c.name.localeCompare(b.c.name, "pt-BR"));
+      .filter((r) => (filter === "aniv" ? r.birthMonth : filter === "inativas" ? r.inactive : true))
+      .sort((a, b) =>
+        filter === "aniv"
+          ? a.bd.day - b.bd.day
+          : filter === "inativas"
+          ? b.daysSince - a.daysSince
+          : a.c.name.localeCompare(b.c.name, "pt-BR")
+      );
     // eslint-disable-next-line
-  }, [clients, orders, query]);
+  }, [clients, orders, query, filter]);
 
   function formatDate(ts) {
     return new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" });
   }
-  function waLink(phone) {
+  function waLink(phone, text) {
     let d = (phone || "").replace(/\D/g, "");
     if (d.length <= 11) d = "55" + d;
-    return `https://wa.me/${d}`;
+    return `https://wa.me/${d}${text ? "?text=" + encodeURIComponent(text) : ""}`;
   }
 
   async function submit() {
@@ -2204,6 +2234,7 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
       await onSave(modal.id, {
         name: modal.form.name.trim(),
         phone: modal.form.phone.trim(),
+        birthday: modal.form.birthday.trim(),
         city: modal.form.city.trim(),
         notes: modal.form.notes.trim(),
       });
@@ -2225,7 +2256,15 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
           <input style={styles.searchInput} placeholder="Buscar por nome, telefone ou cidade…" value={query} onChange={(e) => setQuery(e.target.value)} />
         </div>
         <div style={styles.chipRow}>
-          <span style={{ ...styles.chip, cursor: "default" }}>{(clients || []).length} cliente(s)</span>
+          <button className="chip" style={{ ...styles.chip, ...(filter === "todas" ? styles.chipActive : {}) }} onClick={() => setFilter("todas")}>
+            Todas ({(clients || []).length})
+          </button>
+          <button className="chip" style={{ ...styles.chip, ...(filter === "aniv" ? styles.chipActive : {}) }} onClick={() => setFilter("aniv")}>
+            Aniversariantes do mês
+          </button>
+          <button className="chip" style={{ ...styles.chip, ...(filter === "inativas" ? styles.chipActive : {}) }} onClick={() => setFilter("inativas")}>
+            Sem comprar há +{INACTIVE_DAYS} dias
+          </button>
           <button className="chip" style={styles.chip} onClick={onRefresh}>atualizar</button>
         </div>
       </div>
@@ -2236,7 +2275,7 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
       )}
 
       {!loading &&
-        rows.map(({ c, os, total, pending, toPay }) => (
+        rows.map(({ c, os, total, pending, toPay, daysSince, bd, birthMonth, birthToday, inactive }) => (
           <div key={c.id} style={styles.orderCard}>
             <div style={styles.orderCardHeader}>
               <div>
@@ -2249,6 +2288,22 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
               </div>
             </div>
             {c.notes && <div style={{ fontSize: 12.5, color: "#8A7B6E", margin: "8px 0" }}>{c.notes}</div>}
+            {(bd || daysSince !== null) && (
+              <div style={{ fontSize: 12.5, color: "#8A7B6E", margin: "6px 0" }}>
+                {bd && (
+                  <span style={birthMonth ? { color: "#A8687A", fontWeight: 500 } : undefined}>
+                    Aniversário {String(bd.day).padStart(2, "0")}/{String(bd.month).padStart(2, "0")}
+                    {birthToday ? " — é hoje!" : birthMonth ? " — neste mês" : ""}
+                  </span>
+                )}
+                {bd && daysSince !== null && " · "}
+                {daysSince !== null && (
+                  <span style={inactive ? { color: "#B15768" } : undefined}>
+                    última compra {daysSince === 0 ? "hoje" : `há ${daysSince} dia(s)`}
+                  </span>
+                )}
+              </div>
+            )}
             {(pending > 0 || toPay > 0) && (
               <div style={{ fontSize: 12.5, color: "#B15768", margin: "6px 0" }}>
                 {pending > 0 && `${pending} pedido(s) para entregar`}
@@ -2257,10 +2312,30 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
               </div>
             )}
             <div style={{ ...styles.orderCardFooter, flexWrap: "wrap", gap: 10 }}>
-              <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {c.phone && (
-                  <a href={waLink(c.phone)} target="_blank" rel="noreferrer" style={{ ...styles.catalogWaBtn, textDecoration: "none" }}>
+                  <a href={waLink(c.phone)} target="_blank" rel="noreferrer" style={styles.clientWaBtn}>
                     <MessageCircle size={13} /> WhatsApp
+                  </a>
+                )}
+                {c.phone && birthMonth && (
+                  <a
+                    href={waLink(c.phone, `Oi, ${c.name.split(" ")[0]}! Feliz aniversário! 🎂🌸 Que seu dia seja lindo! Um beijo da MawiFlorart.`)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={styles.clientWaBtn}
+                  >
+                    🎂 Dar parabéns
+                  </a>
+                )}
+                {c.phone && inactive && (
+                  <a
+                    href={waLink(c.phone, `Oi, ${c.name.split(" ")[0]}! Tudo bem? Aqui é da MawiFlorart 🌸 Faz um tempinho que não conversamos — temos novidades no catálogo, quer dar uma olhadinha?`)}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={styles.clientWaBtn}
+                  >
+                    Retomar contato
                   </a>
                 )}
                 <button className="chip" style={styles.chip} onClick={() => setOpenId(openId === c.id ? null : c.id)}>
@@ -2271,7 +2346,7 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
                 <button
                   style={styles.iconBtn}
                   aria-label="Editar cliente"
-                  onClick={() => { setError(""); setModal({ id: c.id, form: { name: c.name || "", phone: c.phone || "", city: c.city || "", notes: c.notes || "" } }); }}
+                  onClick={() => { setError(""); setModal({ id: c.id, form: { name: c.name || "", phone: c.phone || "", birthday: c.birthday || "", city: c.city || "", notes: c.notes || "" } }); }}
                 >
                   <Pencil size={14} />
                 </button>
@@ -2313,6 +2388,9 @@ function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, mo
               </Field>
               <Field label="WhatsApp">
                 <input style={styles.input} value={modal.form.phone} onChange={(e) => setField("phone", e.target.value)} placeholder="43 99999-9999" inputMode="tel" />
+              </Field>
+              <Field label="Aniversário (dia/mês)">
+                <input style={styles.input} value={modal.form.birthday} onChange={(e) => setField("birthday", e.target.value)} placeholder="ex.: 15/03" />
               </Field>
               <Field label="Cidade / endereço">
                 <input style={styles.input} value={modal.form.city} onChange={(e) => setField("city", e.target.value)} placeholder="cidade ou endereço" />
@@ -2743,7 +2821,32 @@ export function CatalogPage() {
   );
 }
 
-function PedidosTab({ orders, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
+function PedidosTab({ orders, clients, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
+  const [pixKey, setPixKey] = useState(() => {
+    try { return localStorage.getItem("mawi_pix") || ""; } catch (e) { return ""; }
+  });
+  function changePix(v) {
+    setPixKey(v);
+    try { localStorage.setItem("mawi_pix", v); } catch (e) {}
+  }
+  function summaryLink(o) {
+    const lines = [
+      `Olá, ${(o.customerName || "").split(" ")[0]}! Segue o resumo do seu pedido na MawiFlorart 🌸`,
+      "",
+      ...(o.items || []).map((i) => `• ${i.qty}x ${i.productName} — ${currency(i.unitPrice * i.qty)}`),
+      "",
+      `Total: ${currency(o.total)}`,
+    ];
+    if (o.paid) lines.push("Pagamento: confirmado ✓");
+    else if (pixKey.trim()) lines.push(`Pix: ${pixKey.trim()}`);
+    lines.push("", "Obrigada pela preferência! 💗");
+    const text = encodeURIComponent(lines.join("\n"));
+    const norm = (t) => (t || "").trim().toLowerCase();
+    const client = (clients || []).find((c) => (o.clientId && c.id === o.clientId) || norm(c.name) === norm(o.customerName));
+    let phone = client && client.phone ? client.phone.replace(/\D/g, "") : "";
+    if (phone && phone.length <= 11) phone = "55" + phone;
+    return `https://wa.me/${phone}?text=${text}`;
+  }
   const [pendingOnly, setPendingOnly] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busyId, setBusyId] = useState(null);
@@ -2797,6 +2900,11 @@ function PedidosTab({ orders, loading, onRefresh, onToggleDelivered, onTogglePai
         </div>
       </div>
 
+      <div style={{ ...styles.searchWrap, marginBottom: 14 }}>
+        <span style={{ ...styles.fieldLabelText, whiteSpace: "nowrap" }}>Minha chave Pix</span>
+        <input style={styles.searchInput} placeholder="aparece no resumo enviado à cliente (fica salva neste aparelho)" value={pixKey} onChange={(e) => changePix(e.target.value)} />
+      </div>
+
       {loading && <div style={styles.emptyState}>Carregando pedidos…</div>}
       {!loading && filtered.length === 0 && (
         <div style={styles.emptyState}>Nenhum pedido por aqui. Clique em "Novo pedido" para começar.</div>
@@ -2845,6 +2953,9 @@ function PedidosTab({ orders, loading, onRefresh, onToggleDelivered, onTogglePai
                   {o.paid ? "✓ Pago" : "Marcar pago"}
                 </button>
               </div>
+              <a href={summaryLink(o)} target="_blank" rel="noreferrer" style={styles.clientWaBtn}>
+                <MessageCircle size={13} /> Enviar resumo
+              </a>
               <button style={{ ...styles.iconBtn, color: "#B15768" }} onClick={() => setDeleteTarget(o)} aria-label="Excluir pedido">
                 <Trash2 size={14} />
               </button>
@@ -3061,6 +3172,17 @@ function VendasTab({ sales, loading, onRefresh, onDelete, onSaveEdit }) {
 function CatalogoTab({ products, loading, query, setQuery, categories }) {
   const [activeCategory, setActiveCategory] = useState("Todas");
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
+  const [qrOpen, setQrOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const catalogUrl = `${window.location.origin}/catalogo`;
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=600x600&margin=10&data=${encodeURIComponent(catalogUrl)}`;
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(catalogUrl);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (e) {}
+  }
 
   const filtered = (products || [])
     .filter((p) => p.showInCatalog !== false)
@@ -3074,7 +3196,29 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
     <>
       <div style={styles.catalogIntro}>
         Esta é a visão que seus clientes veem — sem custos nem estoque, só nome, foto e preço.
+        <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <button style={styles.clientWaBtn} onClick={() => setQrOpen(true)}>QR Code do catálogo</button>
+          <button style={styles.clientWaBtn} onClick={copyLink}>{copied ? "Link copiado ✓" : "Copiar link"}</button>
+        </div>
       </div>
+      {qrOpen && (
+        <div style={styles.overlay} onClick={() => setQrOpen(false)}>
+          <div style={{ ...styles.modal, maxWidth: 380, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>QR Code do catálogo</h2>
+              <button type="button" style={styles.iconBtn} onClick={() => setQrOpen(false)} aria-label="Fechar">
+                <X size={18} />
+              </button>
+            </div>
+            <img src={qrUrl} alt="QR Code do catálogo" style={{ width: "100%", maxWidth: 280, border: "1px solid #E5DAD3" }} />
+            <p style={{ fontSize: 12.5, color: "#8A7B6E", wordBreak: "break-all" }}>{catalogUrl}</p>
+            <p style={{ fontSize: 12.5, color: "#8A7B6E" }}>A cliente aponta a câmera do celular e abre o catálogo. Para salvar ou imprimir, abra a imagem em tamanho grande:</p>
+            <div style={{ ...styles.modalActions, justifyContent: "center" }}>
+              <a href={qrUrl} target="_blank" rel="noreferrer" style={{ ...styles.primaryBtn, textDecoration: "none" }}>Abrir imagem grande</a>
+            </div>
+          </div>
+        </div>
+      )}
       <Toolbar
         query={query}
         setQuery={setQuery}
@@ -3272,6 +3416,7 @@ const styles = {
   catalogCardName: { fontFamily: "'Cormorant Garamond', serif", fontSize: 16, fontWeight: 500, color: "#4A3F38", marginBottom: 8, lineHeight: 1.3 },
   catalogCardFooter: { display: "flex", alignItems: "center", justifyContent: "space-between" },
   catalogCardPrice: { fontFamily: "'Cormorant Garamond', serif", fontStyle: "italic", fontWeight: 500, fontSize: 15, color: "#5C5049" },
+  clientWaBtn: { display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 12px", borderRadius: 999, border: "1px solid #E5DAD3", background: "transparent", color: "#A8687A", fontSize: 12, textDecoration: "none", whiteSpace: "nowrap" },
   catalogWaBtn: { width: 26, height: 26, borderRadius: "50%", border: "1px solid #E5DAD3", background: "transparent", color: "#A8687A", display: "inline-flex", alignItems: "center", justifyContent: "center" },
   lightboxOverlay: { position: "fixed", inset: 0, background: "rgba(30,25,22,0.9)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 80, cursor: "zoom-out" },
   lightboxImg: { maxWidth: "92vw", maxHeight: "88vh", objectFit: "contain", borderRadius: 4, cursor: "default" },
