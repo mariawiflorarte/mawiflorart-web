@@ -172,3 +172,24 @@ export async function loadOrders() {
   const snap = await getDocs(query(ORDERS_COL, orderBy("createdAt", "desc")));
   return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
 }
+
+// Clientes: cadastro simples (nome, WhatsApp, cidade/endereço, observações).
+const CLIENTS_COL = collection(db, "clients");
+
+export async function addClient(client) {
+  const docRef = await addDoc(CLIENTS_COL, client);
+  return { id: docRef.id, ...client };
+}
+
+export async function updateClient(id, fields) {
+  await setDoc(doc(db, "clients", id), fields, { merge: true });
+}
+
+export async function deleteClientDoc(id) {
+  await deleteDoc(doc(db, "clients", id));
+}
+
+export async function loadClients() {
+  const snap = await getDocs(CLIENTS_COL);
+  return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+}

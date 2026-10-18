@@ -13,6 +13,10 @@ import {
   updateOrder,
   deleteOrderDoc,
   loadOrders,
+  loadClients,
+  addClient,
+  updateClient,
+  deleteClientDoc,
 } from "./firebase.js";
 
 import {
@@ -222,7 +226,38 @@ export default function App() {
     }
   }
 
+  const [clients, setClients] = useState(null);
+  const [clientsLoading, setClientsLoading] = useState(false);
+  const [clientModal, setClientModal] = useState(null); // { id|null, form }
+
+  async function refreshClients() {
+    setClientsLoading(true);
+    try {
+      setClients(await loadClients());
+    } catch (e) {
+      setClients((prev) => prev || []);
+    } finally {
+      setClientsLoading(false);
+    }
+  }
+
+  async function handleSaveClient(id, fields) {
+    if (id) {
+      await updateClient(id, fields);
+      setClients((prev) => (prev || []).map((c) => (c.id === id ? { ...c, ...fields } : c)));
+    } else {
+      const saved = await addClient({ ...fields, createdAt: Date.now() });
+      setClients((prev) => [...(prev || []), saved]);
+    }
+  }
+
+  async function handleDeleteClient(c) {
+    await deleteClientDoc(c.id);
+    setClients((prev) => (prev || []).filter((x) => x.id !== c.id));
+  }
+
   function openOrderModal() {
+    if (clients === null) refreshClients();
     setOrderForm({ customerName: "", items: [] });
     setOrderError("");
     setOrderModal(true);
@@ -264,8 +299,11 @@ export default function App() {
       };
     });
     const total = items.reduce((s, it) => s + it.unitPrice * it.qty, 0);
+    const typedName = orderForm.customerName.trim();
+    const matchedClient = (clients || []).find((c) => (c.name || "").trim().toLowerCase() === typedName.toLowerCase());
     const order = {
-      customerName: orderForm.customerName.trim(),
+      customerName: typedName,
+      clientId: matchedClient ? matchedClient.id : null,
       items,
       total,
       delivered: false,
@@ -975,6 +1013,12 @@ export default function App() {
               Nova matéria-prima
             </button>
           )}
+          {tab === "clientes" && (
+            <button style={styles.addBtn} onClick={() => setClientModal({ id: null, form: { name: "", phone: "", city: "", notes: "" } })}>
+              <Plus size={18} />
+              Nova cliente
+            </button>
+          )}
           {tab === "pedidos" && (
             <button style={styles.addBtn} onClick={openOrderModal}>
               <Plus size={18} />
@@ -1042,6 +1086,17 @@ export default function App() {
             }}
           >
             Pedidos
+          </button>
+          <button
+            className="tab-btn"
+            style={{ ...styles.tabBtn, ...(tab === "clientes" ? styles.tabBtnActive : {}) }}
+            onClick={() => {
+              setTab("clientes");
+              if (clients === null) refreshClients();
+              if (orders === null) refreshOrders();
+            }}
+          >
+            Clientes
           </button>
           <button
             className="tab-btn"
@@ -1384,6 +1439,17 @@ export default function App() {
             onDelete={handleDeleteSale}
             onSaveEdit={handleSaveSaleEdit}
           />
+        ) : tab === "clientes" ? (
+          <ClientesTab
+            clients={clients}
+            orders={orders}
+            loading={clientsLoading || clients === null}
+            onRefresh={() => { refreshClients(); refreshOrders(); }}
+            onSave={handleSaveClient}
+            onDelete={handleDeleteClient}
+            modal={clientModal}
+            setModal={setClientModal}
+          />
         ) : (
           <PedidosTab
             orders={orders}
@@ -1638,8 +1704,14 @@ export default function App() {
                   style={styles.input}
                   value={orderForm.customerName}
                   onChange={(e) => setOrderForm({ ...orderForm, customerName: e.target.value })}
-                  placeholder="nome do cliente"
+                  placeholder="nome do cliente (ou escolha uma cadastrada)"
+                  list="clientes-lista"
                 />
+                <datalist id="clientes-lista">
+                  {(clients || []).map((c) => (
+                    <option key={c.id} value={c.name} />
+                  ))}
+                </datalist>
               </Field>
             </div>
 
@@ -1911,6 +1983,19 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
   const toReceiveTotal = toReceive.reduce((a, o) => a + (Number(o.total) || 0), 0);
   const pendingTotal = pendingOrders.reduce((a, o) => a + (Number(o.total) || 0), 0);
 
+  const topClients = useMemo(() => {
+    const m = {};
+    (orders || []).forEach((o) => {
+      const k = (o.customerName || "").trim();
+      if (!k) return;
+      const key = k.toLowerCase();
+      if (!m[key]) m[key] = { name: k, n: 0, total: 0 };
+      m[key].n += 1;
+      m[key].total += Number(o.total) || 0;
+    });
+    return Object.values(m).sort((a, b) => b.total - a.total).slice(0, 5);
+  }, [orders]);
+
   const lowProducts = (products || []).filter((p) => Number(p.qty) <= Number(p.minStock || 0));
   const lowMaterials = (materials || []).filter((m) => Number(m.qty) <= Number(m.minStock || 0));
 
@@ -2009,6 +2094,21 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
         </div>
       )}
 
+      {topClients.length > 0 && (
+        <div style={box}>
+          <div style={boxTitle}>
+            <span>Melhores clientes</span>
+            <button style={linkBtn} onClick={() => onGoto("clientes")}>ver clientes</button>
+          </div>
+          {topClients.map((c, i) => (
+            <div key={c.name} style={rowStyle}>
+              <span><strong style={{ color: "#A8687A" }}>{i + 1}º</strong> {c.name} <span style={{ color: "#B0A599" }}>· {c.n} pedido(s)</span></span>
+              <strong>{currency(c.total)}</strong>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={box}>
         <div style={boxTitle}><span>Produtos mais vendidos</span></div>
         <div style={{ ...styles.chipRow, marginBottom: 10 }}>
@@ -2053,6 +2153,205 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
         )}
       </div>
     </div>
+  );
+}
+
+function ClientesTab({ clients, orders, loading, onRefresh, onSave, onDelete, modal, setModal }) {
+  const [query, setQuery] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const norm = (t) => (t || "").trim().toLowerCase();
+  const ordersOf = (c) =>
+    (orders || []).filter((o) => (o.clientId && o.clientId === c.id) || norm(o.customerName) === norm(c.name));
+
+  const rows = useMemo(() => {
+    const q = norm(query);
+    return (clients || [])
+      .filter((c) => !q || norm(c.name).includes(q) || (c.phone || "").includes(q) || norm(c.city).includes(q))
+      .map((c) => {
+        const os = ordersOf(c);
+        return {
+          c,
+          os,
+          total: os.reduce((a, o) => a + (Number(o.total) || 0), 0),
+          pending: os.filter((o) => !o.delivered).length,
+          toPay: os.filter((o) => o.delivered && !o.paid).reduce((a, o) => a + (Number(o.total) || 0), 0),
+        };
+      })
+      .sort((a, b) => a.c.name.localeCompare(b.c.name, "pt-BR"));
+    // eslint-disable-next-line
+  }, [clients, orders, query]);
+
+  function formatDate(ts) {
+    return new Date(ts).toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" });
+  }
+  function waLink(phone) {
+    let d = (phone || "").replace(/\D/g, "");
+    if (d.length <= 11) d = "55" + d;
+    return `https://wa.me/${d}`;
+  }
+
+  async function submit() {
+    if (!modal.form.name.trim()) {
+      setError("Informe o nome da cliente.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSave(modal.id, {
+        name: modal.form.name.trim(),
+        phone: modal.form.phone.trim(),
+        city: modal.form.city.trim(),
+        notes: modal.form.notes.trim(),
+      });
+      setModal(null);
+      setError("");
+    } catch (e) {
+      setError("Não foi possível salvar agora. Tente novamente.");
+    } finally {
+      setSaving(false);
+    }
+  }
+  const setField = (k, v) => setModal({ ...modal, form: { ...modal.form, [k]: v } });
+
+  return (
+    <>
+      <div style={styles.toolbar}>
+        <div style={styles.searchWrap}>
+          <Search size={16} color="#8A8375" />
+          <input style={styles.searchInput} placeholder="Buscar por nome, telefone ou cidade…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        </div>
+        <div style={styles.chipRow}>
+          <span style={{ ...styles.chip, cursor: "default" }}>{(clients || []).length} cliente(s)</span>
+          <button className="chip" style={styles.chip} onClick={onRefresh}>atualizar</button>
+        </div>
+      </div>
+
+      {loading && <div style={styles.emptyState}>Carregando clientes…</div>}
+      {!loading && rows.length === 0 && (
+        <div style={styles.emptyState}>Nenhuma cliente por aqui. Clique em "Nova cliente" para começar.</div>
+      )}
+
+      {!loading &&
+        rows.map(({ c, os, total, pending, toPay }) => (
+          <div key={c.id} style={styles.orderCard}>
+            <div style={styles.orderCardHeader}>
+              <div>
+                <div style={styles.productName}>{c.name}</div>
+                <div style={styles.productCode}>{[c.phone, c.city].filter(Boolean).join(" · ") || "sem contato"}</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ ...styles.catalogCardPrice, fontSize: 17 }}>{currency(total)}</div>
+                <div style={styles.productCode}>{os.length} pedido(s)</div>
+              </div>
+            </div>
+            {c.notes && <div style={{ fontSize: 12.5, color: "#8A7B6E", margin: "8px 0" }}>{c.notes}</div>}
+            {(pending > 0 || toPay > 0) && (
+              <div style={{ fontSize: 12.5, color: "#B15768", margin: "6px 0" }}>
+                {pending > 0 && `${pending} pedido(s) para entregar`}
+                {pending > 0 && toPay > 0 && " · "}
+                {toPay > 0 && `a receber ${currency(toPay)}`}
+              </div>
+            )}
+            <div style={{ ...styles.orderCardFooter, flexWrap: "wrap", gap: 10 }}>
+              <div style={{ display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+                {c.phone && (
+                  <a href={waLink(c.phone)} target="_blank" rel="noreferrer" style={{ ...styles.catalogWaBtn, textDecoration: "none" }}>
+                    <MessageCircle size={13} /> WhatsApp
+                  </a>
+                )}
+                <button className="chip" style={styles.chip} onClick={() => setOpenId(openId === c.id ? null : c.id)}>
+                  {openId === c.id ? "ocultar histórico" : "ver histórico"}
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 4 }}>
+                <button
+                  style={styles.iconBtn}
+                  aria-label="Editar cliente"
+                  onClick={() => { setError(""); setModal({ id: c.id, form: { name: c.name || "", phone: c.phone || "", city: c.city || "", notes: c.notes || "" } }); }}
+                >
+                  <Pencil size={14} />
+                </button>
+                <button style={{ ...styles.iconBtn, color: "#B15768" }} aria-label="Excluir cliente" onClick={() => setDeleteTarget(c)}>
+                  <Trash2 size={14} />
+                </button>
+              </div>
+            </div>
+            {openId === c.id && (
+              <div style={{ marginTop: 10 }}>
+                {os.length === 0 && <div style={styles.productCode}>Ainda sem pedidos.</div>}
+                {os.map((o) => (
+                  <div key={o.id} style={{ ...styles.orderItemRow, padding: "5px 0", borderBottom: "1px solid #F1E9E4" }}>
+                    <span>
+                      {formatDate(o.createdAt)} · {(o.items || []).map((i) => `${i.qty}x ${i.productName}`).join(", ")}
+                    </span>
+                    <span style={{ whiteSpace: "nowrap" }}>
+                      {currency(o.total)} · {o.delivered ? "entregue" : "pendente"} · {o.paid ? "pago" : "não pago"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+
+      {modal && (
+        <div style={styles.overlay} onClick={() => setModal(null)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>{modal.id ? "Editar cliente" : "Nova cliente"}</h2>
+              <button type="button" style={styles.iconBtn} onClick={() => setModal(null)} aria-label="Fechar">
+                <X size={18} />
+              </button>
+            </div>
+            <div style={styles.formGrid}>
+              <Field label="Nome" full>
+                <input style={styles.input} value={modal.form.name} onChange={(e) => setField("name", e.target.value)} placeholder="nome da cliente" />
+              </Field>
+              <Field label="WhatsApp">
+                <input style={styles.input} value={modal.form.phone} onChange={(e) => setField("phone", e.target.value)} placeholder="43 99999-9999" inputMode="tel" />
+              </Field>
+              <Field label="Cidade / endereço">
+                <input style={styles.input} value={modal.form.city} onChange={(e) => setField("city", e.target.value)} placeholder="cidade ou endereço" />
+              </Field>
+              <Field label="Observações" full>
+                <textarea
+                  style={{ ...styles.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
+                  value={modal.form.notes}
+                  onChange={(e) => setField("notes", e.target.value)}
+                  placeholder="ex.: gosta de rosa, paga no Pix"
+                />
+              </Field>
+            </div>
+            {error && <p style={styles.saveError}>{error}</p>}
+            <div style={styles.modalActions}>
+              <button style={styles.secondaryBtn} onClick={() => setModal(null)}>Cancelar</button>
+              <button style={styles.primaryBtn} onClick={submit} disabled={saving}>{saving ? "Salvando…" : "Salvar"}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {deleteTarget && (
+        <div style={styles.overlay} onClick={() => setDeleteTarget(null)}>
+          <div style={styles.confirmBox} onClick={(e) => e.stopPropagation()}>
+            <p style={styles.confirmText}>Excluir {deleteTarget.name} do cadastro? Os pedidos dela continuam salvos.</p>
+            <div style={styles.modalActions}>
+              <button style={styles.secondaryBtn} onClick={() => setDeleteTarget(null)}>Cancelar</button>
+              <button
+                style={styles.dangerBtn}
+                onClick={async () => { await onDelete(deleteTarget); setDeleteTarget(null); }}
+              >
+                Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
