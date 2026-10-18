@@ -394,7 +394,14 @@ export default function App() {
     }
   }
 
-  const [tab, setTab] = useState("produtos");
+  const [tab, setTab] = useState("inicio");
+  useEffect(() => {
+    if (tab === "inicio" && authUser) {
+      if (sales === null) refreshSales();
+      if (orders === null) refreshOrders();
+    }
+    // eslint-disable-next-line
+  }, [tab, authUser]);
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("Todas");
   const [showLowOnly, setShowLowOnly] = useState(false);
@@ -978,6 +985,13 @@ export default function App() {
         <div style={styles.tabRow}>
           <button
             className="tab-btn"
+            style={{ ...styles.tabBtn, ...(tab === "inicio" ? styles.tabBtnActive : {}) }}
+            onClick={() => setTab("inicio")}
+          >
+            Início
+          </button>
+          <button
+            className="tab-btn"
             style={{ ...styles.tabBtn, ...(tab === "produtos" ? styles.tabBtnActive : {}) }}
             onClick={() => {
               setTab("produtos");
@@ -1065,7 +1079,20 @@ export default function App() {
           </div>
         )}
 
-        {tab === "produtos" ? (
+        {tab === "inicio" ? (
+          <HomeTab
+            products={data ? data.products : []}
+            materials={data ? data.materials : []}
+            sales={sales}
+            orders={orders}
+            loading={salesLoading || ordersLoading}
+            onRefresh={() => { refreshSales(); refreshOrders(); }}
+            onGoto={(t) => {
+              setTab(t);
+              if (t === "pedidos" && orders === null) refreshOrders();
+            }}
+          />
+        ) : tab === "produtos" ? (
           <>
             <section className="stats-grid" style={styles.statsGrid}>
               <StatCard label="Produtos cadastrados" value={productStats.total} />
@@ -1852,6 +1879,180 @@ function Toolbar({ query, setQuery, showLowOnly, setShowLowOnly, chips, sortAsc,
         </button>
       </div>
     </section>
+  );
+}
+
+function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGoto }) {
+  const [period, setPeriod] = useState("month");
+  const [rankBy, setRankBy] = useState("qty");
+  const [catFilter, setCatFilter] = useState("Todas");
+
+  const DAY = 24 * 60 * 60 * 1000;
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const startOfMonth = new Date();
+  startOfMonth.setDate(1);
+  startOfMonth.setHours(0, 0, 0, 0);
+
+  const sums = useMemo(() => {
+    const r = { today: 0, week: 0, month: 0, todayN: 0, monthN: 0 };
+    (sales || []).forEach((s) => {
+      const t = Number(s.total) || 0;
+      if (s.timestamp >= startOfToday.getTime()) { r.today += t; r.todayN += 1; }
+      if (s.timestamp >= Date.now() - 7 * DAY) r.week += t;
+      if (s.timestamp >= startOfMonth.getTime()) { r.month += t; r.monthN += 1; }
+    });
+    return r;
+    // eslint-disable-next-line
+  }, [sales]);
+
+  const pendingOrders = (orders || []).filter((o) => !o.delivered);
+  const toReceive = (orders || []).filter((o) => o.delivered && !o.paid);
+  const toReceiveTotal = toReceive.reduce((a, o) => a + (Number(o.total) || 0), 0);
+  const pendingTotal = pendingOrders.reduce((a, o) => a + (Number(o.total) || 0), 0);
+
+  const lowProducts = (products || []).filter((p) => Number(p.qty) <= Number(p.minStock || 0));
+  const lowMaterials = (materials || []).filter((m) => Number(m.qty) <= Number(m.minStock || 0));
+
+  const categories = useMemo(() => {
+    const set = new Set();
+    (products || []).forEach((p) => p.category && set.add(p.category));
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "pt-BR"));
+  }, [products]);
+
+  const ranking = useMemo(() => {
+    const since =
+      period === "today" ? startOfToday.getTime()
+      : period === "week" ? Date.now() - 7 * DAY
+      : period === "month" ? startOfMonth.getTime()
+      : 0;
+    const catById = {};
+    (products || []).forEach((p) => { catById[p.id] = p.category || "Outros"; });
+    const map = {};
+    (sales || []).forEach((s) => {
+      if (s.timestamp < since) return;
+      const cat = catById[s.productId] || "Outros";
+      if (catFilter !== "Todas" && cat !== catFilter) return;
+      const key = s.productId || s.productName;
+      if (!map[key]) map[key] = { key, name: s.productName, category: cat, qty: 0, revenue: 0 };
+      map[key].qty += Number(s.qty) || 0;
+      map[key].revenue += Number(s.total) || 0;
+    });
+    const list = Object.values(map);
+    list.sort((a, b) => (rankBy === "qty" ? b.qty - a.qty || b.revenue - a.revenue : b.revenue - a.revenue || b.qty - a.qty));
+    return list;
+    // eslint-disable-next-line
+  }, [sales, products, period, rankBy, catFilter]);
+
+  const maxVal = ranking.length ? (rankBy === "qty" ? ranking[0].qty : ranking[0].revenue) || 1 : 1;
+  const periodLabels = { today: "Hoje", week: "7 dias", month: "Este mês", all: "Tudo" };
+  const box = { background: "#FEFCFA", border: "1px solid #E5DAD3", padding: "16px 18px", marginBottom: 18 };
+  const boxTitle = { fontSize: 11.5, letterSpacing: 1.2, textTransform: "uppercase", color: "#A8687A", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "center" };
+  const linkBtn = { border: "none", background: "transparent", color: "#A8687A", fontSize: 12, textDecoration: "underline", cursor: "pointer", padding: 0 };
+  const rowStyle = { display: "flex", justifyContent: "space-between", gap: 10, padding: "5px 0", fontSize: 13.5, borderBottom: "1px solid #F1E9E4" };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+        <button style={linkBtn} onClick={onRefresh}>{loading ? "Atualizando…" : "Atualizar dados"}</button>
+      </div>
+
+      <section className="stats-grid" style={styles.statsGrid}>
+        <StatCard label="Vendas hoje" value={currency(sums.today)} />
+        <StatCard label="Últimos 7 dias" value={currency(sums.week)} />
+        <StatCard label="Este mês" value={currency(sums.month)} />
+      </section>
+
+      <section className="stats-grid" style={styles.statsGrid}>
+        <StatCard label="Pedidos pendentes" value={`${pendingOrders.length}${pendingOrders.length ? " · " + currency(pendingTotal) : ""}`} />
+        <StatCard label="A receber (entregue, não pago)" value={`${toReceive.length}${toReceive.length ? " · " + currency(toReceiveTotal) : ""}`} tone={toReceive.length ? "warn" : undefined} />
+        <StatCard label="Estoque baixo" value={`${lowProducts.length} prod. · ${lowMaterials.length} mat.`} tone={lowProducts.length + lowMaterials.length ? "warn" : undefined} />
+      </section>
+
+      {pendingOrders.length > 0 && (
+        <div style={box}>
+          <div style={boxTitle}>
+            <span>Pedidos para entregar</span>
+            <button style={linkBtn} onClick={() => onGoto("pedidos")}>ver pedidos</button>
+          </div>
+          {pendingOrders.slice(0, 5).map((o) => (
+            <div key={o.id} style={rowStyle}>
+              <span>{o.customerName || "Sem nome"} <span style={{ color: "#B0A599" }}>· {(o.items || []).reduce((a, i) => a + (Number(i.qty) || 0), 0)} item(ns)</span></span>
+              <strong>{currency(o.total)}</strong>
+            </div>
+          ))}
+          {pendingOrders.length > 5 && <div style={{ fontSize: 12, color: "#B0A599", paddingTop: 6 }}>+ {pendingOrders.length - 5} pedido(s)</div>}
+        </div>
+      )}
+
+      {(lowProducts.length > 0 || lowMaterials.length > 0) && (
+        <div style={box}>
+          <div style={boxTitle}><span>Atenção ao estoque</span></div>
+          {lowProducts.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: "#B0A599", marginBottom: 4 }}>Produtos <button style={linkBtn} onClick={() => onGoto("produtos")}>abrir</button></div>
+              {lowProducts.slice(0, 6).map((p) => (
+                <div key={p.id} style={rowStyle}><span>{p.name}</span><strong style={{ color: "#B15768" }}>{p.qty} / mín. {p.minStock || 0}</strong></div>
+              ))}
+              {lowProducts.length > 6 && <div style={{ fontSize: 12, color: "#B0A599", padding: "4px 0" }}>+ {lowProducts.length - 6} produto(s)</div>}
+            </>
+          )}
+          {lowMaterials.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: "#B0A599", margin: "10px 0 4px" }}>Matérias-primas <button style={linkBtn} onClick={() => onGoto("materia-prima")}>abrir</button></div>
+              {lowMaterials.slice(0, 6).map((m) => (
+                <div key={m.id} style={rowStyle}><span>{m.name}</span><strong style={{ color: "#B15768" }}>{m.qty} {m.unit} / mín. {m.minStock || 0}</strong></div>
+              ))}
+              {lowMaterials.length > 6 && <div style={{ fontSize: 12, color: "#B0A599", padding: "4px 0" }}>+ {lowMaterials.length - 6} matéria(s)-prima(s)</div>}
+            </>
+          )}
+        </div>
+      )}
+
+      <div style={box}>
+        <div style={boxTitle}><span>Produtos mais vendidos</span></div>
+        <div style={{ ...styles.chipRow, marginBottom: 10 }}>
+          {Object.keys(periodLabels).map((k) => (
+            <button key={k} className="chip" style={{ ...styles.chip, ...(period === k ? styles.chipActive : {}) }} onClick={() => setPeriod(k)}>{periodLabels[k]}</button>
+          ))}
+        </div>
+        <div style={{ ...styles.chipRow, marginBottom: 10 }}>
+          <button className="chip" style={{ ...styles.chip, ...(rankBy === "qty" ? styles.chipActive : {}) }} onClick={() => setRankBy("qty")}>Por quantidade</button>
+          <button className="chip" style={{ ...styles.chip, ...(rankBy === "revenue" ? styles.chipActive : {}) }} onClick={() => setRankBy("revenue")}>Por faturamento</button>
+        </div>
+        <div style={{ ...styles.chipRow, marginBottom: 14 }}>
+          {["Todas", ...categories].map((c) => (
+            <button key={c} className="chip" style={{ ...styles.chip, ...(catFilter === c ? styles.chipActive : {}) }} onClick={() => setCatFilter(c)}>{c}</button>
+          ))}
+        </div>
+
+        {sales === null ? (
+          <div style={styles.emptyState}>Carregando vendas…</div>
+        ) : ranking.length === 0 ? (
+          <div style={styles.emptyState}>Nenhuma venda neste período.</div>
+        ) : (
+          ranking.slice(0, 10).map((r, i) => {
+            const val = rankBy === "qty" ? r.qty : r.revenue;
+            return (
+              <div key={r.key} style={{ marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 13.5 }}>
+                  <span><strong style={{ color: "#A8687A" }}>{i + 1}º</strong> {r.name}</span>
+                  <span style={{ whiteSpace: "nowrap" }}>{r.qty} un · {currency(r.revenue)}</span>
+                </div>
+                <div style={{ height: 6, background: "#F1E9E4", marginTop: 4 }}>
+                  <div style={{ height: 6, width: `${Math.max(4, (val / maxVal) * 100)}%`, background: i === 0 ? "#C9A0A8" : "#E0C6CB" }} />
+                </div>
+              </div>
+            );
+          })
+        )}
+        {ranking.length > 0 && (
+          <div style={{ fontSize: 12, color: "#B0A599", marginTop: 8 }}>
+            Total no período: {ranking.reduce((a, r) => a + r.qty, 0)} un · {currency(ranking.reduce((a, r) => a + r.revenue, 0))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
