@@ -60,6 +60,28 @@ function getCategoryIcon(name) {
 const STORAGE_KEY = "mawiflorart:data";
 const DEFAULT_BDAY_MSG =
   "Olá, {nome}! Passando para desejar um feliz aniversário. Que o seu novo ciclo venha cheio de saúde, alegria e muitas flores pelo caminho.\n\nObrigada por fazer parte da história da MawiFlorart.\n\nUm abraço e um ótimo dia!\n\nMawiFlorart";
+function effectivePrice(p) {
+  const base = Number(p.price) || 0;
+  const promo = Number(p.promoPrice) || 0;
+  return p.badge === "promocao" && promo > 0 && promo < base ? promo : base;
+}
+function parseDue(d) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d || "");
+  return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+}
+function dueInfo(d) {
+  const dt = parseDue(d);
+  if (!dt) return null;
+  const t = new Date();
+  t.setHours(0, 0, 0, 0);
+  const days = Math.round((dt.getTime() - t.getTime()) / 86400000);
+  const date = dt.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  if (days < 0) return { days, date, color: "#B15768", label: `atrasado ${-days} dia(s)` };
+  if (days === 0) return { days, date, color: "#B15768", label: "para hoje" };
+  if (days === 1) return { days, date, color: "#C27A3E", label: "amanhã" };
+  if (days <= 7) return { days, date, color: "#C27A3E", label: `em ${days} dias` };
+  return { days, date, color: "#8A7B6E", label: `em ${days} dias` };
+}
 const WHATSAPP_NUMBER = "5543999475765"; // 43 99947-5765
 
 function whatsappLink(productName) {
@@ -184,7 +206,7 @@ function resizeImageFile(file, maxDim = 320, quality = 0.72) {
   });
 }
 function emptyProductForm() {
-  return { id: null, code: "", name: "", category: "Enfeites", unit: "un", qty: "", minStock: "", cost: "", laborCost: "", variableCost: "", price: "", recipe: [], photo: "", showInCatalog: true };
+  return { id: null, code: "", name: "", category: "Enfeites", unit: "un", qty: "", minStock: "", cost: "", laborCost: "", variableCost: "", price: "", recipe: [], photo: "", showInCatalog: true, badge: "", promoPrice: "" };
 }
 function emptyMaterialForm() {
   return { id: null, code: "", name: "", unit: "un", qty: "", minStock: "", cost: "", photo: "" };
@@ -215,7 +237,7 @@ export default function App() {
   const [orders, setOrders] = useState(null);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [orderModal, setOrderModal] = useState(false);
-  const [orderForm, setOrderForm] = useState({ customerName: "", items: [] });
+  const [orderForm, setOrderForm] = useState({ customerName: "", dueDate: "", items: [] });
   const [orderError, setOrderError] = useState("");
 
   async function refreshOrders() {
@@ -275,7 +297,7 @@ export default function App() {
 
   function openOrderModal() {
     if (clients === null) refreshClients();
-    setOrderForm({ customerName: "", items: [] });
+    setOrderForm({ customerName: "", dueDate: "", items: [] });
     setOrderError("");
     setOrderModal(true);
   }
@@ -312,7 +334,7 @@ export default function App() {
         productId: it.productId,
         productName: product ? product.name : "—",
         qty: Number(it.qty),
-        unitPrice: product ? Number(product.price) || 0 : 0,
+        unitPrice: product ? effectivePrice(product) : 0,
       };
     });
     const total = items.reduce((s, it) => s + it.unitPrice * it.qty, 0);
@@ -323,6 +345,7 @@ export default function App() {
       clientId: matchedClient ? matchedClient.id : null,
       items,
       total,
+      dueDate: orderForm.dueDate || "",
       delivered: false,
       paid: false,
       createdAt: Date.now(),
@@ -435,6 +458,11 @@ export default function App() {
     const paid = !order.paid;
     await updateOrder(order.id, { paid });
     setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, paid } : o)));
+  }
+
+  async function handleSetDue(order, dueDate) {
+    await updateOrder(order.id, { dueDate });
+    setOrders((prev) => prev.map((o) => (o.id === order.id ? { ...o, dueDate } : o)));
   }
 
   async function handleDeleteOrder(order) {
@@ -654,6 +682,8 @@ export default function App() {
       price: String(item.price),
       recipe: item.recipe ? item.recipe.map((r) => ({ ...r, qty: String(r.qty) })) : [],
       showInCatalog: item.showInCatalog !== false,
+      badge: item.badge || "",
+      promoPrice: item.promoPrice ? String(item.promoPrice) : "",
     });
     setProductError("");
     setProductModal(true);
@@ -689,6 +719,8 @@ export default function App() {
         .map((r) => ({ materialId: r.materialId, qty: Number(r.qty) || 0 })),
       photo: productForm.photo || "",
       showInCatalog: productForm.showInCatalog !== false,
+      badge: productForm.badge || "",
+      promoPrice: productForm.badge === "promocao" ? Number(productForm.promoPrice) || 0 : 0,
     };
     updateData((prev) => {
       const exists = prev.products.some((it) => it.id === payload.id);
@@ -1448,6 +1480,7 @@ export default function App() {
           </>
         ) : tab === "catalogo" ? (
           <CatalogoTab
+            internal
             products={data ? data.products : []}
             categories={data ? data.categories : DEFAULT_CATEGORIES}
             loading={loading}
@@ -1485,6 +1518,7 @@ export default function App() {
             onRefresh={refreshOrders}
             onToggleDelivered={handleToggleDelivered}
             onTogglePaid={handleTogglePaid}
+            onSetDue={handleSetDue}
             onDelete={handleDeleteOrder}
           />
         )}
@@ -1563,6 +1597,18 @@ export default function App() {
               <Field label="Preço de venda (R$)">
                 <input style={styles.input} type="number" min="0" step="0.01" value={productForm.price} onChange={(e) => setProductForm({ ...productForm, price: e.target.value })} />
               </Field>
+              <Field label="Destaque no catálogo">
+                <select style={styles.input} value={productForm.badge || ""} onChange={(e) => setProductForm({ ...productForm, badge: e.target.value })}>
+                  <option value="">Nenhum</option>
+                  <option value="novidade">Novidade</option>
+                  <option value="promocao">Promoção</option>
+                </select>
+              </Field>
+              {productForm.badge === "promocao" && (
+                <Field label="Preço promocional (R$)">
+                  <input style={styles.input} type="number" min="0" step="0.01" value={productForm.promoPrice} onChange={(e) => setProductForm({ ...productForm, promoPrice: e.target.value })} />
+                </Field>
+              )}
             </div>
 
             <div style={styles.recipeTotalBox}>
@@ -1741,6 +1787,9 @@ export default function App() {
                   ))}
                 </datalist>
               </Field>
+              <Field label="Prazo de entrega (opcional)" full>
+                <input style={styles.input} type="date" value={orderForm.dueDate || ""} onChange={(e) => setOrderForm({ ...orderForm, dueDate: e.target.value })} />
+              </Field>
             </div>
 
             <div style={styles.recipeSection}>
@@ -1754,7 +1803,7 @@ export default function App() {
               {orderForm.items.map((row, idx) => {
                 const product = data ? data.products.find((p) => p.id === row.productId) : null;
                 const qty = Number(row.qty) || 0;
-                const subtotal = product ? Number(product.price || 0) * qty : 0;
+                const subtotal = product ? effectivePrice(product) * qty : 0;
                 return (
                   <div key={idx} style={styles.recipeRowWrap}>
                     <div style={styles.recipeRow}>
@@ -1787,7 +1836,7 @@ export default function App() {
                     </div>
                     {product && qty > 0 && (
                       <div style={styles.recipeRowCost}>
-                        {qty} × {currency(product.price)} = <strong>{currency(subtotal)}</strong>
+                        {qty} × {currency(effectivePrice(product))} = <strong>{currency(subtotal)}</strong>
                       </div>
                     )}
                   </div>
@@ -1800,7 +1849,7 @@ export default function App() {
                     {currency(
                       orderForm.items.reduce((s, row) => {
                         const product = data ? data.products.find((p) => p.id === row.productId) : null;
-                        return s + (product ? Number(product.price || 0) * (Number(row.qty) || 0) : 0);
+                        return s + (product ? effectivePrice(product) * (Number(row.qty) || 0) : 0);
                       }, 0)
                     )}
                   </strong>
@@ -2006,7 +2055,14 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
     // eslint-disable-next-line
   }, [sales]);
 
-  const pendingOrders = (orders || []).filter((o) => !o.delivered);
+  const pendingOrders = (orders || [])
+    .filter((o) => !o.delivered)
+    .slice()
+    .sort((a, b) => ((a.dueDate || "9999") < (b.dueDate || "9999") ? -1 : (a.dueDate || "9999") > (b.dueDate || "9999") ? 1 : 0));
+  const dueSoon = pendingOrders.filter((o) => {
+    const di = dueInfo(o.dueDate);
+    return di && di.days <= 7;
+  });
   const toReceive = (orders || []).filter((o) => o.delivered && !o.paid);
   const toReceiveTotal = toReceive.reduce((a, o) => a + (Number(o.total) || 0), 0);
   const pendingTotal = pendingOrders.reduce((a, o) => a + (Number(o.total) || 0), 0);
@@ -2085,12 +2141,15 @@ function HomeTab({ products, materials, sales, orders, loading, onRefresh, onGot
       {pendingOrders.length > 0 && (
         <div style={box}>
           <div style={boxTitle}>
-            <span>Pedidos para entregar</span>
+            <span>Pedidos para entregar{dueSoon.length > 0 ? ` — ${dueSoon.length} com prazo em até 7 dias ou atrasado(s)` : ""}</span>
             <button style={linkBtn} onClick={() => onGoto("pedidos")}>ver pedidos</button>
           </div>
           {pendingOrders.slice(0, 5).map((o) => (
             <div key={o.id} style={rowStyle}>
-              <span>{o.customerName || "Sem nome"} <span style={{ color: "#B0A599" }}>· {(o.items || []).reduce((a, i) => a + (Number(i.qty) || 0), 0)} item(ns)</span></span>
+              <span>
+                {o.customerName || "Sem nome"} <span style={{ color: "#B0A599" }}>· {(o.items || []).reduce((a, i) => a + (Number(i.qty) || 0), 0)} item(ns)</span>
+                {dueInfo(o.dueDate) && <strong style={{ color: dueInfo(o.dueDate).color, marginLeft: 6 }}>· {dueInfo(o.dueDate).label} ({dueInfo(o.dueDate).date.slice(0, 5)})</strong>}
+              </span>
               <strong>{currency(o.total)}</strong>
             </div>
           ))}
@@ -2872,7 +2931,7 @@ export function CatalogPage() {
   );
 }
 
-function PedidosTab({ settings, onChangeSettings, orders, clients, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
+function PedidosTab({ onSetDue, settings, onChangeSettings, orders, clients, loading, onRefresh, onToggleDelivered, onTogglePaid, onDelete }) {
   const pixKey = (settings && settings.pixKey) || "";
   const changePix = (v) => onChangeSettings({ pixKey: v });
   function summaryLink(o) {
@@ -2897,7 +2956,16 @@ function PedidosTab({ settings, onChangeSettings, orders, clients, loading, onRe
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [busyId, setBusyId] = useState(null);
 
-  const filtered = (orders || []).filter((o) => (pendingOnly ? !o.delivered : true));
+  const [sortDue, setSortDue] = useState(false);
+  const filtered = (orders || [])
+    .filter((o) => (pendingOnly ? !o.delivered : true))
+    .slice()
+    .sort((a, b) => {
+      if (!sortDue) return 0;
+      const da = !a.delivered && a.dueDate ? a.dueDate : "9999";
+      const db2 = !b.delivered && b.dueDate ? b.dueDate : "9999";
+      return da < db2 ? -1 : da > db2 ? 1 : 0;
+    });
 
   function formatDate(ts) {
     return new Date(ts).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit", hour: "2-digit", minute: "2-digit" });
@@ -2940,6 +3008,9 @@ function PedidosTab({ settings, onChangeSettings, orders, clients, loading, onRe
           >
             Só pendentes
           </button>
+          <button className="chip" style={{ ...styles.chip, ...(sortDue ? styles.chipActive : {}) }} onClick={() => setSortDue((v) => !v)}>
+            Ordenar por prazo
+          </button>
           <button className="chip" style={styles.chip} onClick={onRefresh}>
             atualizar
           </button>
@@ -2969,6 +3040,18 @@ function PedidosTab({ settings, onChangeSettings, orders, clients, loading, onRe
               </div>
             </div>
 
+            {!o.delivered && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 8, fontSize: 12.5 }}>
+                <span style={{ color: "#B0A599" }}>Prazo:</span>
+                <input
+                  type="date"
+                  style={{ ...styles.input, padding: "4px 8px", fontSize: 12.5 }}
+                  value={o.dueDate || ""}
+                  onChange={(e) => onSetDue(o, e.target.value)}
+                />
+                {dueInfo(o.dueDate) && <strong style={{ color: dueInfo(o.dueDate).color }}>{dueInfo(o.dueDate).label}</strong>}
+              </div>
+            )}
             <div style={styles.orderItemsList}>
               {o.items.map((item, i) => (
                 <div key={i} style={styles.orderItemRow}>
@@ -3215,10 +3298,39 @@ function VendasTab({ sales, loading, onRefresh, onDelete, onSaveEdit }) {
   );
 }
 
-function CatalogoTab({ products, loading, query, setQuery, categories }) {
+function CatalogoTab({ products, loading, query, setQuery, categories, internal }) {
   const [activeCategory, setActiveCategory] = useState("Todas");
   const [lightboxPhoto, setLightboxPhoto] = useState(null);
   const [qrOpen, setQrOpen] = useState(false);
+  const [cart, setCart] = useState({}); // { productId: qty }
+  const [cartOpen, setCartOpen] = useState(false);
+  const [cartName, setCartName] = useState("");
+  const hasNovidade = (products || []).some((p) => p.showInCatalog !== false && p.badge === "novidade");
+  const hasPromo = (products || []).some((p) => p.showInCatalog !== false && p.badge === "promocao");
+  const addToCart = (p) => setCart((c) => ({ ...c, [p.id]: (c[p.id] || 0) + 1 }));
+  const setCartQty = (id, q) =>
+    setCart((c) => {
+      const n = { ...c };
+      if (q <= 0) delete n[id];
+      else n[id] = q;
+      return n;
+    });
+  const cartItems = Object.keys(cart)
+    .map((id) => ({ p: (products || []).find((x) => x.id === id), qty: cart[id] }))
+    .filter((x) => x.p);
+  const cartCount = cartItems.reduce((a, x) => a + x.qty, 0);
+  const cartTotal = cartItems.reduce((a, x) => a + effectivePrice(x.p) * x.qty, 0);
+  const cartLink = (() => {
+    const lines = [
+      "Olá! Gostaria de fazer um pedido pela MawiFlorart:",
+      "",
+      ...cartItems.map((x) => `- ${x.qty}x ${x.p.name}: ${currency(effectivePrice(x.p) * x.qty)}`),
+      "",
+      `Total: ${currency(cartTotal)}`,
+    ];
+    if (cartName.trim()) lines.push("", `Nome: ${cartName.trim()}`);
+    return `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(lines.join("\n"))}`;
+  })();
   const [copied, setCopied] = useState(false);
   const catalogUrl = `${window.location.origin}/catalogo`;
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=600x600&margin=10&data=${encodeURIComponent(catalogUrl)}`;
@@ -3232,7 +3344,15 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
 
   const filtered = (products || [])
     .filter((p) => p.showInCatalog !== false)
-    .filter((p) => activeCategory === "Todas" || p.category === activeCategory)
+    .filter((p) =>
+      activeCategory === "Todas"
+        ? true
+        : activeCategory === "__novidade"
+        ? p.badge === "novidade"
+        : activeCategory === "__promocao"
+        ? p.badge === "promocao"
+        : p.category === activeCategory
+    )
     .filter((p) => {
       if (query.trim() && !p.name.toLowerCase().includes(query.toLowerCase())) return false;
       return true;
@@ -3240,6 +3360,7 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
 
   return (
     <>
+      {internal && (
       <div style={styles.catalogIntro}>
         Esta é a visão que seus clientes veem — sem custos nem estoque, só nome, foto e preço.
         <div style={{ marginTop: 8, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -3247,6 +3368,7 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
           <button style={styles.clientWaBtn} onClick={copyLink}>{copied ? "Link copiado ✓" : "Copiar link"}</button>
         </div>
       </div>
+      )}
       {qrOpen && (
         <div style={styles.overlay} onClick={() => setQrOpen(false)}>
           <div style={{ ...styles.modal, maxWidth: 380, textAlign: "center" }} onClick={(e) => e.stopPropagation()}>
@@ -3279,6 +3401,16 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
             >
               Todas
             </button>
+            {hasNovidade && (
+              <button className="chip" style={{ ...styles.chip, ...(activeCategory === "__novidade" ? styles.chipActive : {}) }} onClick={() => setActiveCategory("__novidade")}>
+                Novidades
+              </button>
+            )}
+            {hasPromo && (
+              <button className="chip" style={{ ...styles.chip, ...(activeCategory === "__promocao" ? styles.chipActive : {}) }} onClick={() => setActiveCategory("__promocao")}>
+                Promoções
+              </button>
+            )}
             {(categories || DEFAULT_CATEGORIES).map((c) => (
               <button
                 key={c}
@@ -3301,24 +3433,112 @@ function CatalogoTab({ products, loading, query, setQuery, categories }) {
           {filtered.map((p) => (
             <div key={p.id} style={styles.catalogCard}>
               <div
-                style={{ ...styles.catalogCardImg, cursor: p.photo ? "zoom-in" : "default" }}
+                style={{ ...styles.catalogCardImg, position: "relative", cursor: p.photo ? "zoom-in" : "default" }}
                 onClick={() => p.photo && setLightboxPhoto({ src: p.photo, name: p.name })}
               >
                 {p.photo ? <img src={p.photo} alt={p.name} style={styles.catalogCardPhoto} /> : <Flower2 size={26} color="#D9C3C8" />}
+                {p.badge && (
+                  <span
+                    style={{
+                      position: "absolute",
+                      top: 8,
+                      left: 8,
+                      background: p.badge === "promocao" ? "#B15768" : "#A8687A",
+                      color: "#FFF9F7",
+                      fontSize: 10.5,
+                      letterSpacing: 1,
+                      textTransform: "uppercase",
+                      padding: "3px 8px",
+                      borderRadius: 999,
+                    }}
+                  >
+                    {p.badge === "promocao" ? "Promoção" : "Novidade"}
+                  </span>
+                )}
               </div>
               <div style={styles.catalogCardBody}>
                 <div style={styles.catalogCardCategory}>{p.category}</div>
                 <div style={styles.catalogCardName}>{p.name}</div>
                 <div style={styles.catalogCardFooter}>
-                  <span style={styles.catalogCardPrice}>{currency(p.price)}</span>
-                  <a href={whatsappLink(p.name)} target="_blank" rel="noreferrer" style={styles.catalogWaBtn} title="Pedir pelo WhatsApp">
-                    <MessageCircle size={13} />
-                  </a>
+                  <span style={styles.catalogCardPrice}>
+                    {effectivePrice(p) < (Number(p.price) || 0) && (
+                      <span style={{ textDecoration: "line-through", color: "#B0A599", fontSize: 12, marginRight: 6 }}>{currency(p.price)}</span>
+                    )}
+                    {currency(effectivePrice(p))}
+                  </span>
+                  <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                    <button style={styles.clientWaBtn} onClick={() => addToCart(p)} title="Adicionar ao pedido">
+                      <Plus size={12} /> Pedir
+                    </button>
+                    <a href={whatsappLink(p.name)} target="_blank" rel="noreferrer" style={styles.catalogWaBtn} title="Perguntar pelo WhatsApp">
+                      <MessageCircle size={13} />
+                    </a>
+                  </span>
                 </div>
               </div>
             </div>
           ))}
         </section>
+      )}
+
+      {cartCount > 0 && !cartOpen && (
+        <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 40, display: "flex", justifyContent: "center", padding: 12, pointerEvents: "none" }}>
+          <button
+            style={{ ...styles.primaryBtn, pointerEvents: "auto", display: "inline-flex", alignItems: "center", gap: 8, boxShadow: "0 4px 16px rgba(0,0,0,0.18)" }}
+            onClick={() => setCartOpen(true)}
+          >
+            <ShoppingCart size={16} /> Meu pedido ({cartCount} {cartCount === 1 ? "item" : "itens"}) · {currency(cartTotal)}
+          </button>
+        </div>
+      )}
+
+      {cartOpen && (
+        <div style={styles.overlay} onClick={() => setCartOpen(false)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h2 style={styles.modalTitle}>Meu pedido</h2>
+              <button type="button" style={styles.iconBtn} onClick={() => setCartOpen(false)} aria-label="Fechar">
+                <X size={18} />
+              </button>
+            </div>
+            {cartItems.length === 0 && <p style={styles.hint}>Seu pedido está vazio.</p>}
+            {cartItems.map(({ p, qty }) => (
+              <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #F1E9E4" }}>
+                <div style={{ flex: 1 }}>
+                  <div style={styles.productName}>{p.name}</div>
+                  <div style={styles.productCode}>{currency(effectivePrice(p))} cada</div>
+                </div>
+                <button style={styles.iconBtn} onClick={() => setCartQty(p.id, qty - 1)} aria-label="Diminuir">−</button>
+                <strong style={{ minWidth: 18, textAlign: "center" }}>{qty}</strong>
+                <button style={styles.iconBtn} onClick={() => setCartQty(p.id, qty + 1)} aria-label="Aumentar">+</button>
+                <div style={{ minWidth: 70, textAlign: "right", fontSize: 13 }}>{currency(effectivePrice(p) * qty)}</div>
+                <button style={styles.iconBtn} onClick={() => setCartQty(p.id, 0)} aria-label="Remover"><X size={14} /></button>
+              </div>
+            ))}
+            {cartItems.length > 0 && (
+              <>
+                <div style={{ ...styles.recipeTotalBox, marginTop: 14 }}>
+                  <span>Total</span>
+                  <strong>{currency(cartTotal)}</strong>
+                </div>
+                <div style={{ marginTop: 14 }}>
+                  <Field label="Seu nome (opcional)" full>
+                    <input style={styles.input} value={cartName} onChange={(e) => setCartName(e.target.value)} placeholder="como podemos te chamar" />
+                  </Field>
+                </div>
+                <p style={{ fontSize: 12, color: "#8A7B6E" }}>
+                  Ao enviar, o WhatsApp abre com o seu pedido pronto. Combinamos entrega e pagamento por lá.
+                </p>
+                <div style={styles.modalActions}>
+                  <button style={styles.secondaryBtn} onClick={() => setCart({})}>Limpar</button>
+                  <a href={cartLink} target="_blank" rel="noreferrer" style={{ ...styles.primaryBtn, textDecoration: "none" }}>
+                    Enviar pelo WhatsApp
+                  </a>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       {lightboxPhoto && (
